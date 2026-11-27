@@ -218,8 +218,10 @@ fun AnimeDiscussionSection(
     val feedbackError by viewModel.discussionErrorMessage.collectAsState()
     val mentionSuggestions by viewModel.mentionSuggestions.collectAsState()
     val communityEmojis by viewModel.communityEmojis.collectAsState()
+    val communityMembers by viewModel.communityMembers.collectAsState()
 
     val emojiById = remember(communityEmojis) { communityEmojis.associateBy { it.id.lowercase() } }
+    val memberById = remember(communityMembers) { communityMembers.associateBy { it.userId } }
     val chronologicalComments = remember(comments) { comments.asReversed() }
     val listState = rememberLazyListState()
 
@@ -540,9 +542,25 @@ fun AnimeDiscussionSection(
                                 t.commentId == comment.id || t.replyId == comment.id
                             } == true
                             val isEditingThis = editingCommentId == comment.id
+                            val memberFallback = memberById[comment.userId]
+                            val resolvedAvatarKey = when {
+                                isMine && !profile?.avatarKey.isNullOrBlank() -> profile!!.avatarKey
+                                com.example.model.BuiltInAvatarFrame.extractKey(comment.avatarKey) != null -> comment.avatarKey
+                                !memberFallback?.avatarKey.isNullOrBlank() -> memberFallback!!.avatarKey
+                                else -> comment.avatarKey
+                            }
+                            val resolvedUsername = when {
+                                isMine && !profile?.username.isNullOrBlank() -> profile!!.username
+                                comment.username.isNotBlank() -> comment.username
+                                !memberFallback?.username.isNullOrBlank() -> memberFallback!!.username
+                                else -> "Member"
+                            }
+                            val displayComment = if (resolvedAvatarKey != comment.avatarKey || resolvedUsername != comment.username) {
+                                comment.copy(avatarKey = resolvedAvatarKey, username = resolvedUsername)
+                            } else comment
 
                             LivTrAkChatMessageItem(
-                                comment = comment,
+                                comment = displayComment,
                                 isMine = isMine,
                                 isSignedIn = isSignedIn,
                                 isHighlighted = isHighlighted,
@@ -1021,7 +1039,7 @@ private fun LivTrAkChatMessageItem(
             horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
             verticalAlignment = Alignment.Top
         ) {
-            // Only show avatar for left-aligned messages from OTHER users
+            // Left avatar + frame for other users
             if (!isMine) {
                 MemberAvatar(
                     avatarKey = comment.avatarKey,
@@ -1036,12 +1054,13 @@ private fun LivTrAkChatMessageItem(
                 horizontalAlignment = if (isMine) Alignment.End else Alignment.Start,
                 modifier = Modifier.weight(1f, fill = false)
             ) {
-                // Header: Hide redundant self-username on right-aligned self messages
+                // Header: Show username + timestamp cleanly for both other users and self
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 2.dp)
                 ) {
+                    val editedTag = if (comment.updatedAt.isNotBlank() && comment.updatedAt != comment.createdAt) " • edited" else ""
                     if (!isMine) {
                         Text(
                             text = comment.username,
@@ -1050,13 +1069,25 @@ private fun LivTrAkChatMessageItem(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        Text(
+                            text = "${formatCommunityTimestamp(comment.createdAt)}$editedTag",
+                            style = TabularNumSmall.copy(fontSize = 10.sp),
+                            color = LivTrAkAsh2
+                        )
+                    } else {
+                        Text(
+                            text = "${formatCommunityTimestamp(comment.createdAt)}$editedTag",
+                            style = TabularNumSmall.copy(fontSize = 10.sp),
+                            color = LivTrAkAsh2
+                        )
+                        Text(
+                            text = comment.username,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold, fontSize = 11.5.sp),
+                            color = LivTrAkGoldSoft,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
-                    val editedTag = if (comment.updatedAt.isNotBlank() && comment.updatedAt != comment.createdAt) " • edited" else ""
-                    Text(
-                        text = "${formatCommunityTimestamp(comment.createdAt)}$editedTag",
-                        style = TabularNumSmall.copy(fontSize = 10.sp),
-                        color = LivTrAkAsh2
-                    )
                 }
 
                 // Solo circular sticker / unicode emoji WITHOUT comment cloud
@@ -1159,6 +1190,17 @@ private fun LivTrAkChatMessageItem(
                         }
                     }
                 }
+            }
+
+            // Right avatar + frame for own messages so users clearly see their profile & frame in chat
+            if (isMine) {
+                MemberAvatar(
+                    avatarKey = comment.avatarKey,
+                    avatarUrl = comment.avatarUrl,
+                    username = comment.username,
+                    size = 30.dp,
+                    modifier = Modifier.padding(top = 2.dp, start = 8.dp)
+                )
             }
         }
 

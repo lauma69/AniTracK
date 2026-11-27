@@ -116,12 +116,28 @@ class SupabaseDiscussionService {
                     }
                 }
                 val flatComments = flattenMessagesList(rawComments)
+                val hydratedComments = if (flatComments.isNotEmpty()) {
+                    val userIds = flatComments.map { it.userId }.filter { it.isNotBlank() }.distinct()
+                    val profileMap = fetchProfilesAvatarMap(session, userIds)
+                    if (profileMap.isNotEmpty()) {
+                        flatComments.map { item ->
+                            val latest = profileMap[item.userId]
+                            if (latest != null) {
+                                item.copy(
+                                    username = latest.username.ifBlank { item.username },
+                                    avatarKey = latest.avatarKey.ifBlank { item.avatarKey },
+                                    avatarUrl = latest.avatarUrl ?: item.avatarUrl
+                                )
+                            } else item
+                        }
+                    } else flatComments
+                } else flatComments
                 Result.success(
                     AnimeDiscussionPage(
                         animeId = obj.optInt("anime_id", animeId),
-                        totalComments = obj.optInt("total_comments", flatComments.size),
+                        totalComments = obj.optInt("total_comments", hydratedComments.size),
                         hasMore = obj.optBoolean("has_more", false),
-                        comments = flatComments
+                        comments = hydratedComments
                     )
                 )
             }
@@ -149,12 +165,19 @@ class SupabaseDiscussionService {
                 val users = buildList {
                     for (i in 0 until arr.length()) {
                         val u = arr.getJSONObject(i)
+                        val rawKey = u.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+                        val rawFrame = u.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+                        val rawUrl = u.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
                         add(
                             MentionableUser(
                                 id = u.optString("id"),
                                 username = u.optString("username"),
-                                avatarKey = u.optString("avatar_key", "avatar_1").ifBlank { "avatar_1" },
-                                avatarUrl = u.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
+                                avatarKey = com.example.model.BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                                    rawAvatarKey = rawKey,
+                                    rawAvatarFrame = rawFrame,
+                                    rawAvatarUrl = rawUrl
+                                ),
+                                avatarUrl = rawUrl
                             )
                         )
                     }
@@ -707,6 +730,50 @@ class SupabaseDiscussionService {
         }
     }
 
+    private fun fetchProfilesAvatarMap(session: AuthSession, userIds: Collection<String>): Map<String, MentionableUser> {
+        val cleanIds = userIds.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (!AppConfig.isSupabaseConfigured || cleanIds.isEmpty()) return emptyMap()
+        return try {
+            val idList = cleanIds.joinToString(",") { URLEncoder.encode(it, "UTF-8") }
+            val req = Request.Builder()
+                .url("${AppConfig.supabaseUrl}/rest/v1/profiles?id=in.($idList)&select=*")
+                .addHeader("apikey", AppConfig.supabaseAnonKey)
+                .addHeader("Authorization", "Bearer ${session.accessToken}")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty().trim()
+                if (!resp.isSuccessful || !body.startsWith("[")) return emptyMap()
+                val arr = JSONArray(body)
+                buildMap {
+                    for (i in 0 until arr.length()) {
+                        val u = arr.getJSONObject(i)
+                        val uid = u.optString("id")
+                        if (uid.isBlank()) continue
+                        val rawAvatarKey = u.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+                        val rawAvatarFrame = u.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+                        val rawAvatarUrl = u.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
+                        put(
+                            uid,
+                            MentionableUser(
+                                id = uid,
+                                username = u.optString("username", "Member").ifBlank { "Member" },
+                                avatarKey = com.example.model.BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                                    rawAvatarKey = rawAvatarKey,
+                                    rawAvatarFrame = rawAvatarFrame,
+                                    rawAvatarUrl = rawAvatarUrl
+                                ),
+                                avatarUrl = rawAvatarUrl
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
     suspend fun fetchUserProfileSnippet(session: AuthSession, userId: String): MentionableUser? = withContext(Dispatchers.IO) {
         if (!AppConfig.isSupabaseConfigured || userId.isBlank()) return@withContext null
         try {
@@ -1147,13 +1214,20 @@ class SupabaseDiscussionService {
                 )
             }
         }
+        val rawKey = obj.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+        val rawFrame = obj.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+        val rawUrl = obj.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
         return AnimeCommentItem(
             id = obj.optString("id"),
             animeId = obj.optInt("anime_id", 0),
             userId = obj.optString("user_id"),
             username = obj.optString("username", "Member"),
-            avatarKey = obj.optString("avatar_key", "avatar_1").ifBlank { "avatar_1" },
-            avatarUrl = obj.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" },
+            avatarKey = com.example.model.BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                rawAvatarKey = rawKey,
+                rawAvatarFrame = rawFrame,
+                rawAvatarUrl = rawUrl
+            ),
+            avatarUrl = rawUrl,
             content = obj.optString("content", ""),
             createdAt = obj.optString("created_at", ""),
             updatedAt = obj.optString("updated_at", ""),
@@ -1166,13 +1240,20 @@ class SupabaseDiscussionService {
     }
 
     private fun parseReply(obj: JSONObject): CommentReplyItem {
+        val rawKey = obj.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+        val rawFrame = obj.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+        val rawUrl = obj.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
         return CommentReplyItem(
             id = obj.optString("id"),
             threadId = obj.optString("thread_id"),
             userId = obj.optString("user_id"),
             username = obj.optString("username", "Member"),
-            avatarKey = obj.optString("avatar_key", "avatar_1").ifBlank { "avatar_1" },
-            avatarUrl = obj.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" },
+            avatarKey = com.example.model.BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                rawAvatarKey = rawKey,
+                rawAvatarFrame = rawFrame,
+                rawAvatarUrl = rawUrl
+            ),
+            avatarUrl = rawUrl,
             content = obj.optString("content", ""),
             parentCommentId = obj.optString("parent_comment_id").takeIf { it.isNotBlank() && it != "null" },
             quotedCommentId = obj.optString("quoted_comment_id").takeIf { it.isNotBlank() && it != "null" },

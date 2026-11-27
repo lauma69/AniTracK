@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,6 +42,7 @@ import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Tune
@@ -76,6 +80,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -466,10 +471,26 @@ fun SettingsScreen(
 
                                         Spacer(modifier = Modifier.height(AppSpacing.xs))
                                         HorizontalDivider(color = colors.borderSubtle, thickness = 1.dp)
-                                        SettingsSwitchRow(
-                                            title = "Airing Notifications",
-                                            checked = preferences.notificationsEnabled,
-                                            onCheckedChange = { viewModel.setNotificationsEnabled(it) }
+                                        val context = LocalContext.current
+                                        AppSecondaryButton(
+                                            text = "Open Notification Settings",
+                                            leadingIcon = Icons.Filled.Notifications,
+                                            onClick = {
+                                                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                                    }
+                                                } else {
+                                                    Intent("android.settings.APP_NOTIFICATION_SETTINGS").apply {
+                                                        putExtra("app_package", context.packageName)
+                                                        putExtra("app_uid", context.applicationInfo.uid)
+                                                    }
+                                                }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                runCatching { context.startActivity(intent) }
+                                            },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("settings_open_notification_settings_button")
                                         )
                                         HorizontalDivider(color = colors.borderSubtle, thickness = 1.dp)
                                         SettingsSwitchRow(

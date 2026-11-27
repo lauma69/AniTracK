@@ -1453,12 +1453,12 @@ internal fun CommunityAnimeTemplateCard(
                 ) {
                     val visibleAvatars = contributors.take(3)
                     Box(
-                        modifier = Modifier.width((34 + (visibleAvatars.size - 1) * 16).dp),
+                        modifier = Modifier.width((40 + (visibleAvatars.size - 1) * 22).dp),
                         contentAlignment = Alignment.CenterStart
                     ) {
                         visibleAvatars.forEachIndexed { idx, contributor ->
                             Box(
-                                modifier = Modifier.offset(x = (idx * 16).dp),
+                                modifier = Modifier.offset(x = (idx * 22).dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 MemberAvatar(

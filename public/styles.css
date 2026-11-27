@@ -3503,6 +3503,7 @@ svg {
 .c-msg-avatar-wrap {
   flex-shrink: 0;
   margin-top: 2px;
+  overflow: visible;
 }
 
 .c-bubble-wrap {
@@ -3525,6 +3526,12 @@ svg {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.c-user.mine {
+  margin-left: 0;
+  margin-right: 4px;
+  justify-content: flex-end;
 }
 
 .c-time {

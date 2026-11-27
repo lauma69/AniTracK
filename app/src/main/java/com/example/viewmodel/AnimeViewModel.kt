@@ -2958,6 +2958,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                     bio = ""
                 )
                 supabaseAuth.cacheProfileSnapshot(cleanName, avatarKey)
+                syncOwnAvatarAcrossCollections(current.id, cleanName, avatarKey, targetAvatarUrl)
                 refreshCommunityData()
                 _userMessage.value = "Profile updated."
                 onSuccess()
@@ -2966,6 +2967,30 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                 _profileError.value = clean
             }
             _isProfileSaving.value = false
+        }
+    }
+
+    private fun syncOwnAvatarAcrossCollections(
+        userId: String,
+        username: String,
+        avatarKey: String,
+        avatarUrl: String? = null
+    ) {
+        if (userId.isBlank()) return
+        chatProfileCache[userId] = MentionableUser(
+            id = userId,
+            username = username,
+            avatarKey = avatarKey,
+            avatarUrl = avatarUrl
+        )
+        _discussionComments.value = _discussionComments.value.map { c ->
+            if (c.userId == userId) c.copy(username = username, avatarKey = avatarKey, avatarUrl = avatarUrl) else c
+        }
+        _communityReviews.value = _communityReviews.value.map { r ->
+            if (r.userId == userId) r.copy(username = username, avatarKey = avatarKey, avatarUrl = avatarUrl) else r
+        }
+        _communityMembers.value = _communityMembers.value.map { m ->
+            if (m.userId == userId) m.copy(username = username, avatarKey = avatarKey, avatarUrl = avatarUrl) else m
         }
     }
 
@@ -2995,6 +3020,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                     xp = serverXp ?: effectiveXp
                 )
                 supabaseAuth.cacheProfileSnapshot(current.username, resolvedKey)
+                syncOwnAvatarAcrossCollections(current.id, current.username, resolvedKey, current.avatarUrl)
                 refreshCommunityData()
                 _userMessage.value = if (chosenFrame != null) {
                     "Equipped ${chosenFrame.displayName} frame!"

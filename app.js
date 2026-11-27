@@ -2446,10 +2446,18 @@ async function loadCommunityReviews() {
     const profMap = {};
     if (Array.isArray(profRows)) {
       profRows.forEach((p) => {
+        const resolvedComposite = normalizeAvatarCompositeKey(p.avatar_key, p.avatar_url, p.avatar_frame);
         profMap[p.id] = {
           username: p.username || 'Member',
-          avatar_key: normalizeAvatarCompositeKey(p.avatar_key, p.avatar_url, p.avatar_frame)
+          avatar_key: resolvedComposite
         };
+        if (typeof DiscussionRealtimeManager !== 'undefined' && p.id) {
+          DiscussionRealtimeManager.profileCache.set(p.id, {
+            username: p.username || 'Member',
+            avatar_key: resolvedComposite,
+            avatar_url: p.avatar_url || null
+          });
+        }
       });
     }
 
@@ -5544,18 +5552,60 @@ const DiscussionRealtimeManager = {
   cacheProfilesFromMessages(list) {
     for (const m of list || []) {
       if (m?.user_id && m?.username) {
+        const normalizedKey = normalizeAvatarCompositeKey(m.avatar_key, m.avatar_url, m.avatar_frame);
+        const existing = this.profileCache.get(m.user_id);
+        const keepExistingFrame =
+          existing && extractAvatarFrameKey(existing.avatar_key) && !extractAvatarFrameKey(normalizedKey);
         this.profileCache.set(m.user_id, {
           username: m.username,
-          avatar_key: m.avatar_key || 'avatar_1',
+          avatar_key: keepExistingFrame ? existing.avatar_key : normalizedKey,
           avatar_url: m.avatar_url || null
         });
       }
     }
   },
 
+  async hydrateProfilesForMessages(list) {
+    const msgs = Array.isArray(list) ? list : [];
+    const userIds = Array.from(new Set(msgs.map((m) => m?.user_id).filter(Boolean)));
+    if (userIds.length > 0 && state.session) {
+      try {
+        const rows = await supabaseRequest(
+          `/rest/v1/profiles?id=in.(${userIds.map((id) => encodeURIComponent(id)).join(',')})&select=*`,
+          'GET'
+        );
+        if (Array.isArray(rows)) {
+          rows.forEach((p) => {
+            if (!p?.id) return;
+            this.profileCache.set(p.id, {
+              username: p.username || 'Member',
+              avatar_key: normalizeAvatarCompositeKey(p.avatar_key, p.avatar_url, p.avatar_frame),
+              avatar_url: p.avatar_url || null
+            });
+          });
+        }
+      } catch (_) {}
+    }
+    return msgs.map((m) => {
+      if (!m) return m;
+      const isOwn = Boolean(state.session?.userId && m.user_id === state.session.userId);
+      const cached = this.profileCache.get(m.user_id);
+      const resolvedAvatarKey = isOwn
+        ? (state.profile?.avatarKey || cached?.avatar_key || normalizeAvatarCompositeKey(m.avatar_key, m.avatar_url, m.avatar_frame))
+        : (cached?.avatar_key || normalizeAvatarCompositeKey(m.avatar_key, m.avatar_url, m.avatar_frame));
+      const resolvedUsername = isOwn
+        ? (state.profile?.username || cached?.username || m.username || 'Member')
+        : (cached?.username || m.username || 'Member');
+      return {
+        ...m,
+        username: resolvedUsername,
+        avatar_key: resolvedAvatarKey
+      };
+    });
+  },
+
   async resolveSenderProfile(userId) {
     if (!userId) return { username: 'Member', avatar_key: 'avatar_1', avatar_url: null };
-    if (this.profileCache.has(userId)) return this.profileCache.get(userId);
     if (state.session?.userId === userId) {
       const own = {
         username: state.profile?.username || state.session.username || 'Member',
@@ -5565,6 +5615,7 @@ const DiscussionRealtimeManager = {
       this.profileCache.set(userId, own);
       return own;
     }
+    if (this.profileCache.has(userId)) return this.profileCache.get(userId);
     try {
       const rows = await supabaseRequest(
         `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=*&limit=1`,
@@ -5613,7 +5664,8 @@ const DiscussionRealtimeManager = {
               postgres_changes: [
                 { event: '*', schema: 'public', table: 'anime_comments', filter: `anime_id=eq.${aid}` },
                 { event: 'UPDATE', schema: 'public', table: 'comment_replies' },
-                { event: 'DELETE', schema: 'public', table: 'comment_replies' }
+                { event: 'DELETE', schema: 'public', table: 'comment_replies' },
+                { event: 'UPDATE', schema: 'public', table: 'profiles' }
               ]
             },
             access_token: token
@@ -5659,6 +5711,34 @@ const DiscussionRealtimeManager = {
               renderApp();
               scrollChatFeedSmoothly(rec.user_id === state.session?.userId);
             }
+          } else if (evType === 'UPDATE' && table === 'profiles' && rec && rec.id) {
+            const nextAvatarKey = normalizeAvatarCompositeKey(rec.avatar_key, rec.avatar_url, rec.avatar_frame);
+            const nextUsername = rec.username || this.profileCache.get(rec.id)?.username || 'Member';
+            this.profileCache.set(rec.id, {
+              username: nextUsername,
+              avatar_key: nextAvatarKey,
+              avatar_url: rec.avatar_url || null
+            });
+            let changed = false;
+            if (Array.isArray(state.discussion.comments)) {
+              state.discussion.comments = state.discussion.comments.map((m) => {
+                if (m.user_id === rec.id) {
+                  changed = true;
+                  return { ...m, username: nextUsername, avatar_key: nextAvatarKey };
+                }
+                return m;
+              });
+            }
+            if (Array.isArray(state.communityReviews)) {
+              state.communityReviews.forEach((r) => {
+                if (r && r.user_id === rec.id) {
+                  r.username = nextUsername;
+                  r.avatar_key = nextAvatarKey;
+                  changed = true;
+                }
+              });
+            }
+            if (changed) renderApp();
           } else if (evType === 'UPDATE' && rec && rec.id) {
             const existing = state.discussion.comments.find((m) => m.id === rec.id);
             if (!existing) return;
@@ -5764,8 +5844,10 @@ async function loadAnimeDiscussion(animeId, reset = true) {
     });
     if (Number(state.discussion.animeId) !== aid) return;
     const rawIncoming = Array.isArray(data?.comments) ? data.comments : [];
-    const incomingFlat = flattenDiscussionMessages(rawIncoming);
-    DiscussionRealtimeManager.cacheProfilesFromMessages(incomingFlat);
+    const incomingFlatRaw = flattenDiscussionMessages(rawIncoming);
+    DiscussionRealtimeManager.cacheProfilesFromMessages(incomingFlatRaw);
+    const incomingFlat = await DiscussionRealtimeManager.hydrateProfilesForMessages(incomingFlatRaw);
+    if (Number(state.discussion.animeId) !== aid) return;
     const merged = reset
       ? incomingFlat
       : flattenDiscussionMessages([
@@ -8017,12 +8099,17 @@ function renderCommunityScreen() {
                     : `${escapeHtml(lead?.username || 'Member')} rated this ${stars || '5.0'} ★`;
                 const stackedAvatarsHtml = grp.reviews
                   .slice(0, 3)
-                  .map(
-                    (r, idx) =>
-                      `<div style="margin-left:${idx === 0 ? '0' : '-8px'};border:1.5px solid #12151F;border-radius:999px;display:inline-flex;">
-                        ${renderAvatarCircle(r.avatar_key || 'avatar_1', r.username, 28)}
-                      </div>`
-                  )
+                  .map((r, idx) => {
+                    const isOwnRev = Boolean(state.session?.userId && r.user_id === state.session.userId);
+                    const cachedP = typeof DiscussionRealtimeManager !== 'undefined' ? DiscussionRealtimeManager.profileCache.get(r.user_id) : null;
+                    const resolvedAvKey = isOwnRev
+                      ? (state.profile.avatarKey || cachedP?.avatar_key || r.avatar_key || 'avatar_1')
+                      : (cachedP?.avatar_key || r.avatar_key || 'avatar_1');
+                    const hasFrame = Boolean(getAvatarFramePreset(resolvedAvKey));
+                    return `<div style="margin-left:${idx === 0 ? '0' : hasFrame ? '2px' : '-6px'};${hasFrame ? '' : 'border:1.5px solid #12151F;border-radius:999px;'}display:inline-flex;overflow:visible;">
+                      ${renderAvatarCircle(resolvedAvKey, r.username, 28)}
+                    </div>`;
+                  })
                   .join('');
 
                 return `
@@ -8342,7 +8429,7 @@ function renderSettingsScreen() {
         <button class="app-icon-btn" id="btn-settings-back" title="Back">${SVG_ICONS.back}</button>
         <div>
           <h1 class="serif-heading" style="font-size:26px;">${cat ? cat.charAt(0) + cat.slice(1).toLowerCase() : 'Settings'}</h1>
-          <div class="topbar-subtitle">${cat ? 'PREFERENCES & CONTROLS' : 'SYSTEM & PREFERENCES'}</div>
+          <div class="topbar-subtitle">${cat === 'NOTIFICATIONS' ? 'SYSTEM NOTIFICATION SETTINGS' : cat ? 'PREFERENCES & CONTROLS' : 'SYSTEM & PREFERENCES'}</div>
         </div>
       </div>
 
@@ -8355,10 +8442,10 @@ function renderSettingsScreen() {
                 {
                   id: 'NOTIFICATIONS',
                   title: 'Notifications',
-                  sub: `OS Permission: ${osPermLabel} • ${ns.master_enabled !== false ? 'Alerts Active' : 'Muted'} • Messages, Updates & Reminders`
+                  sub: `Status: ${osPermLabel} • Open device notification settings`
                 },
                 { id: 'APPEARANCE', title: 'Appearance', sub: `Theme (${state.prefs.themeMode}) • Accent (${state.prefs.accentTheme}) • Layout (${state.prefs.watchlistLayout})` },
-                { id: 'PREFERENCES', title: 'Preferences', sub: `Title Language (${state.prefs.titleLanguage}) • Safe Mode` },
+                { id: 'PREFERENCES', title: 'Preferences', sub: `Title Language (${state.prefs.titleLanguage})` },
                 { id: 'ABOUT', title: 'About', sub: 'Anime Universe v2.4.0 • Architecture & Credits' }
               ]
                 .map(
@@ -8380,36 +8467,25 @@ function renderSettingsScreen() {
               <div class="app-card" style="display:flex;flex-direction:column;gap:14px;">
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
                   <div>
-                    <div class="micro-label" style="color:var(--accent-primary);">NATIVE OS &amp; DEVICE STATUS</div>
-                    <div class="serif-heading" style="font-size:22px;margin-top:2px;">Device Notification Status</div>
+                    <div class="micro-label" style="color:var(--accent-primary);">DEVICE NOTIFICATIONS</div>
+                    <div class="serif-heading" style="font-size:22px;margin-top:2px;">System Notification Settings</div>
                   </div>
                   <span style="padding:4px 12px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:0.08em;background:rgba(255,255,255,0.06);border:1px solid ${osPermColor};color:${osPermColor};">
-                    OS PERMISSION: ${osPermLabel}
+                    PERMISSION: ${osPermLabel}
                   </span>
                 </div>
 
-                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;padding:12px;border-radius:16px;background:var(--elevated-surface);border:1px solid var(--border-subtle);">
-                  <div>
-                    <div class="micro-label" style="color:var(--text-muted);">PLATFORM</div>
-                    <div style="font-size:13.5px;font-weight:700;color:var(--text-primary);margin-top:2px;">
-                      ${escapeHtml(String(dr.platform || 'web').toUpperCase())} (${escapeHtml(String(dr.push_provider || 'tauri_local').toUpperCase())})
-                    </div>
-                  </div>
-                  <div>
-                    <div class="micro-label" style="color:var(--text-muted);">DEVICE REGISTRATION</div>
-                    <div style="font-size:13.5px;font-weight:700;color:${osPerm === 'granted' && ns.master_enabled !== false ? '#4ADE80' : 'var(--text-secondary)'};margin-top:2px;">
-                      ${osPerm === 'granted' && ns.master_enabled !== false ? '● Registered & Active' : '○ Inactive / Pending Permission'}
-                    </div>
-                  </div>
-                </div>
+                <p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin:0;">
+                  Manage notification permissions, alert style, and sound directly in your device's system settings for <strong>Anime Universe</strong>.
+                </p>
 
                 ${
                   osPerm === 'denied'
                     ? `
                       <div class="notif-perm-denied-box" style="margin:0;">
-                        <div class="notif-perm-denied-title">Notifications are blocked in your system settings</div>
+                        <div class="notif-perm-denied-title">Notifications are turned off in system settings</div>
                         <div class="notif-perm-denied-text">
-                          To receive alerts outside the app, open your device's system notification settings for <strong>Anime Universe</strong> and turn on <strong>Allow Notifications</strong>.
+                          Open your device's notification settings for <strong>Anime Universe</strong> and turn on <strong>Allow Notifications</strong> to receive alerts.
                         </div>
                       </div>
                     `
@@ -8420,69 +8496,14 @@ function renderSettingsScreen() {
                   ${
                     osPerm !== 'granted'
                       ? `<button type="button" class="btn-primary" id="btn-enable-os-notifs" style="height:40px;padding:0 16px;font-size:12.5px;">
-                           Enable Notifications
+                           Allow Notifications
                          </button>`
                       : ''
                   }
-                  <button type="button" class="btn-secondary" id="btn-test-os-notifs" style="height:40px;padding:0 16px;font-size:12.5px;">
-                    Send Test Notification
-                  </button>
-                  <button type="button" class="btn-secondary" id="btn-open-os-notif-settings" style="height:40px;padding:0 14px;font-size:12.5px;">
-                    System Settings
+                  <button type="button" class="${osPerm === 'granted' ? 'btn-primary' : 'btn-secondary'}" id="btn-open-os-notif-settings" style="height:40px;padding:0 16px;font-size:12.5px;">
+                    Open Notification Settings
                   </button>
                 </div>
-              </div>
-
-              <div class="app-card" style="display:flex;flex-direction:column;gap:14px;">
-                <div>
-                  <div class="micro-label" style="color:var(--accent-primary);">NOTIFICATION PREFERENCES</div>
-                  <div class="serif-heading" style="font-size:22px;margin-top:2px;">Categories &amp; Delivery</div>
-                </div>
-
-                ${[
-                  {
-                    key: 'master_enabled',
-                    title: 'Master Notifications',
-                    desc: 'Enable or mute all in-app, background tray, and remote push notifications.'
-                  },
-                  {
-                    key: 'messages_enabled',
-                    title: 'Messages, Replies & @Mentions',
-                    desc: 'Alerts when someone tags you with @ or replies to your message in Community Live Chat.'
-                  },
-                  {
-                    key: 'updates_enabled',
-                    title: 'Anime & App Updates',
-                    desc: 'New release alerts, community announcements, and system updates.'
-                  },
-                  {
-                    key: 'reminders_enabled',
-                    title: 'Episode & Watchlist Reminders',
-                    desc: 'Reminders for airing episodes and tracked anime on your Home schedule.'
-                  }
-                ]
-                  .map((item) => {
-                    const isOn = ns[item.key] !== false;
-                    return `
-                      <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 0;border-top:1px solid var(--border-subtle);">
-                        <div style="flex:1;min-width:0;">
-                          <div style="font-size:14.5px;font-weight:700;color:var(--text-primary);">${escapeHtml(item.title)}</div>
-                          <div style="font-size:12.5px;color:var(--text-secondary);line-height:1.45;margin-top:2px;">${escapeHtml(item.desc)}</div>
-                        </div>
-                        <button
-                          type="button"
-                          class="notif-toggle-switch ${isOn ? 'on' : ''}"
-                          data-toggle-notif-pref="${item.key}"
-                          role="switch"
-                          aria-checked="${isOn ? 'true' : 'false'}"
-                          aria-label="${escapeHtml(item.title)}"
-                        >
-                          <span class="notif-toggle-knob"></span>
-                        </button>
-                      </div>
-                    `;
-                  })
-                  .join('')}
               </div>
             </div>
           `
@@ -8521,20 +8542,6 @@ function renderSettingsScreen() {
                   ${['ENGLISH', 'ROMAJI', 'NATIVE']
                     .map((l) => `<button class="capsule-pill gold-solid ${state.prefs.titleLanguage === l ? 'active' : ''}" data-set-lang="${l}">${l}</button>`)
                     .join('')}
-                </div>
-              </div>
-              <div style="border-top:1px solid var(--border-subtle);padding-top:14px;display:flex;flex-direction:column;gap:10px;">
-                <div class="micro-label" style="color:var(--accent-primary);">SYSTEM &amp; BACKGROUND NOTIFICATIONS</div>
-                <div style="font-size:13px;color:var(--text-secondary);line-height:1.5;">
-                  Receive Community replies &amp; @mentions both inside Anime Universe and in your device notification bar — even when the app is closed.
-                </div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                  <button type="button" class="btn-primary" id="btn-enable-os-notifs" style="height:38px;padding:0 16px;font-size:12.5px;">
-                    ${state.osNotifPermission === 'granted' ? '✓ Notifications Enabled' : 'Enable System Notifications'}
-                  </button>
-                  <button type="button" class="btn-secondary" id="btn-test-os-notifs" style="height:38px;padding:0 14px;font-size:12.5px;">
-                    Send Test Alert
-                  </button>
                 </div>
               </div>
             </div>
@@ -9021,6 +9028,15 @@ function renderAnimeDiscussionSection(anime, options = {}) {
                          </button>`
                       : '';
 
+                  const cachedProfile = DiscussionRealtimeManager.profileCache.get(c.user_id);
+                  const effectiveAvatarKey = isMine
+                    ? (state.profile.avatarKey || cachedProfile?.avatar_key || c.avatar_key || 'avatar_1')
+                    : (cachedProfile?.avatar_key || c.avatar_key || 'avatar_1');
+                  const effectiveUsername = isMine
+                    ? (state.profile.username || cachedProfile?.username || c.username || 'Member')
+                    : (cachedProfile?.username || c.username || 'Member');
+                  const timestampText = `${formatDiscussionTimestamp(c.created_at)}${c.updated_at && c.updated_at !== c.created_at ? ' • edited' : ''}`;
+
                   return `
                     <div class="c-msg-group ${isCommentHighlighted ? 'highlight-pulse' : ''}" id="discussion-comment-${escapeHtml(c.id)}">
                       <div
@@ -9028,18 +9044,21 @@ function renderAnimeDiscussionSection(anime, options = {}) {
                         data-ctx-comment="${escapeHtml(c.id)}"
                         data-ctx-source="${escapeHtml(c.source_type || 'comment')}"
                         data-ctx-uid="${escapeHtml(c.user_id)}"
-                        data-ctx-name="${escapeHtml(c.username || 'Member')}"
+                        data-ctx-name="${escapeHtml(effectiveUsername)}"
                         data-ctx-owner="${isMine ? '1' : '0'}"
                       >
-                        ${!isMine ? `<div class="c-msg-avatar-wrap">${renderAvatarCircle(c.avatar_key || 'avatar_1', c.username, 32)}</div>` : ''}
+                        <div class="c-msg-avatar-wrap">${renderAvatarCircle(effectiveAvatarKey, effectiveUsername, 32)}</div>
                         <div class="c-bubble-wrap">
                           ${
                             !isMine
                               ? `<div class="c-user">
-                                   <span>${escapeHtml(c.username || 'Member')}</span>
-                                   <span class="c-time">${escapeHtml(formatDiscussionTimestamp(c.created_at))}${c.updated_at && c.updated_at !== c.created_at ? ' • edited' : ''}</span>
+                                   <span>${escapeHtml(effectiveUsername)}</span>
+                                   <span class="c-time">${escapeHtml(timestampText)}</span>
                                  </div>`
-                              : `<div class="c-time" style="margin-right:4px;">${escapeHtml(formatDiscussionTimestamp(c.created_at))}${c.updated_at && c.updated_at !== c.created_at ? ' • edited' : ''}</div>`
+                              : `<div class="c-user mine">
+                                   <span class="c-time">${escapeHtml(timestampText)}</span>
+                                   <span>${escapeHtml(effectiveUsername)}</span>
+                                 </div>`
                           }
 
                           ${
@@ -10392,19 +10411,29 @@ function renderModals() {
                                   isMyRev && Number(state.editingCommunityReviewAnimeId) === Number(grp.anime_id)
                                 );
                                 const editStars = Number(state.editingCommunityReviewStars || 0);
+                                const cachedRevProf =
+                                  typeof DiscussionRealtimeManager !== 'undefined'
+                                    ? DiscussionRealtimeManager.profileCache.get(rev.user_id)
+                                    : null;
+                                const revAvatarKey = isMyRev
+                                  ? (state.profile.avatarKey || cachedRevProf?.avatar_key || rev.avatar_key || 'avatar_1')
+                                  : (cachedRevProf?.avatar_key || rev.avatar_key || 'avatar_1');
+                                const revDisplayName = isMyRev
+                                  ? (state.profile.username || cachedRevProf?.username || rev.username || 'Member')
+                                  : (cachedRevProf?.username || rev.username || 'Member');
                                 return `
                                   <div
                                     class="community-comment-item"
                                     data-ctx-comm-note="1"
                                     data-ctx-uid="${escapeHtml(rev.user_id || '')}"
-                                    data-ctx-name="${escapeHtml(rev.username || 'Member')}"
-                                    data-ctx-av="${escapeHtml(rev.avatar_key || 'avatar_1')}"
+                                    data-ctx-name="${escapeHtml(revDisplayName)}"
+                                    data-ctx-av="${escapeHtml(revAvatarKey)}"
                                   >
                                     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
-                                      <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-                                        ${renderAvatarCircle(rev.avatar_key || 'avatar_1', rev.username, 34)}
+                                      <div style="display:flex;align-items:center;gap:10px;min-width:0;overflow:visible;">
+                                        ${renderAvatarCircle(revAvatarKey, revDisplayName, 34)}
                                         <div style="min-width:0;">
-                                          <div style="font-size:14px;font-weight:600;color:var(--text-primary);">${escapeHtml(rev.username || 'Member')}</div>
+                                          <div style="font-size:14px;font-weight:600;color:var(--text-primary);">${escapeHtml(revDisplayName)}</div>
                                           <div style="font-size:11.5px;color:var(--text-muted);">${escapeHtml(formatReviewDate(rev.updated_at))}</div>
                                         </div>
                                       </div>
@@ -12406,22 +12435,6 @@ function bindAppEvents() {
       NativeNotificationBridge.openOsNotificationSettings();
     };
   }
-  const btnTestOsNotifs = document.getElementById('btn-test-os-notifs');
-  if (btnTestOsNotifs) {
-    btnTestOsNotifs.onclick = async () => {
-      await NativeNotificationBridge.sendTestNotification();
-    };
-  }
-  document.querySelectorAll('[data-toggle-notif-pref]').forEach((btn) => {
-    btn.onclick = async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const key = btn.getAttribute('data-toggle-notif-pref');
-      if (!key) return;
-      const currentVal = state.notificationSettings?.[key] !== false;
-      await NativeNotificationBridge.updateNotificationSetting(key, !currentVal);
-    };
-  });
 
   document.querySelectorAll('[data-comm-modal-star]').forEach((btn) => {
     btn.onclick = (e) => {
@@ -13489,9 +13502,16 @@ function bindAppEvents() {
         if (r && r.user_id === myId) r.avatar_key = compositeKey;
       });
     }
-    if (Array.isArray(state.communityComments)) {
-      state.communityComments.forEach((c) => {
+    if (Array.isArray(state.discussion?.comments)) {
+      state.discussion.comments.forEach((c) => {
         if (c && c.user_id === myId) c.avatar_key = compositeKey;
+      });
+    }
+    if (typeof DiscussionRealtimeManager !== 'undefined') {
+      DiscussionRealtimeManager.profileCache.set(myId, {
+        username: state.profile?.username || state.session?.username || 'Member',
+        avatar_key: compositeKey,
+        avatar_url: null
       });
     }
   };
