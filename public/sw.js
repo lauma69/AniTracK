@@ -1,4 +1,4 @@
-const CACHE_NAME = 'anime-universe-pwa-v2.25.0';
+const CACHE_NAME = 'anime-universe-pwa-v2.28.0';
 const EMOJI_CACHE_NAME = 'community-emoji-cache-v1';
 const STATIC_ASSETS = [
   '/',
@@ -19,7 +19,17 @@ const STATIC_ASSETS = [
   '/assets/avatar_6.png',
   '/assets/avatar_7.png',
   '/assets/avatar_8.png',
-  '/assets/avatar_9.png'
+  '/assets/avatar_9.png',
+  '/assets/frames/frame_1.png',
+  '/assets/frames/frame_2.png',
+  '/assets/frames/frame_3.png',
+  '/assets/frames/frame_4.png',
+  '/assets/frames/frame_5.png',
+  '/assets/frames/frame_6.png',
+  '/assets/frames/frame_7.png',
+  '/assets/frames/frame_8.png',
+  '/assets/frames/frame_9.png',
+  '/assets/frames/frame_10.png'
 ];
 
 self.addEventListener('install', (event) => {

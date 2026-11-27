@@ -4,6 +4,7 @@ import com.example.config.AppConfig
 import com.example.data.local.AnimeEntity
 import com.example.model.AnimeCollection
 import com.example.model.AuthSession
+import com.example.model.BuiltInAvatarFrame
 import com.example.model.CommunityActivityItem
 import com.example.model.CommunityCapacity
 import com.example.model.CommunityMember
@@ -804,22 +805,28 @@ class SupabaseDatabaseService {
             }
             val m = if (memberArr.length() > 0) memberArr.getJSONObject(0) else null
 
+            val rawAvatarKey = p.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+            val rawAvatarFrame = p.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+            val rawAvatarUrl = p.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
             Result.success(
                 UserProfile(
                     id = p.getString("id"),
                     email = session.email,
                     username = p.optString("username", "Member"),
-                    avatarKey = p.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
-                        ?: p.optString("avatar_url").takeIf { it.startsWith("avatar_") }
-                        ?: "avatar_1",
-                    avatarUrl = p.optString("avatar_url").takeIf {
+                    avatarKey = BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                        rawAvatarKey = rawAvatarKey,
+                        rawAvatarFrame = rawAvatarFrame,
+                        rawAvatarUrl = rawAvatarUrl
+                    ),
+                    avatarUrl = rawAvatarUrl?.takeIf {
                         it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
                     },
                     bio = p.optString("bio", ""),
                     role = p.optString("role", "member"),
                     canGenerateInvites = p.optBoolean("can_generate_invites", false),
                     memberStatus = MemberStatus.fromDbValue(m?.optString("status")),
-                    joinedAt = m?.optString("joined_at")
+                    joinedAt = m?.optString("joined_at"),
+                    xp = p.optInt("xp", 0).coerceAtLeast(0)
                 )
             )
         } catch (e: Exception) {
@@ -847,9 +854,11 @@ class SupabaseDatabaseService {
             )
         }
         try {
+            val extractedFrame = BuiltInAvatarFrame.extractKey(avatarKey)
             val payload = JSONObject()
                 .put("username", cleanName)
                 .put("avatar_key", avatarKey)
+                .put("avatar_frame", extractedFrame ?: JSONObject.NULL)
                 .put("bio", bio.trim())
             val validHttpAvatarUrl = avatarUrl?.trim()?.takeIf {
                 it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
@@ -866,14 +875,94 @@ class SupabaseDatabaseService {
                 .build()
             client.newCall(req).execute().use { resp ->
                 val body = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) {
-                    Result.failure(Exception(parsePostgrestError(body, "Failed to update profile.")))
-                } else {
-                    Result.success(Unit)
+                if (resp.isSuccessful) {
+                    return@withContext Result.success(Unit)
                 }
+                if (body.contains("avatar_frame", ignoreCase = true)) {
+                    payload.remove("avatar_frame")
+                    val retryReq = requestBuilder("/rest/v1/profiles?id=eq.${session.userId}", session.accessToken)
+                        .addHeader("Prefer", "return=minimal")
+                        .patch(payload.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+                    client.newCall(retryReq).execute().use { retryResp ->
+                        val retryBody = retryResp.body?.string().orEmpty()
+                        if (!retryResp.isSuccessful) {
+                            return@withContext Result.failure(Exception(parsePostgrestError(retryBody, "Failed to update profile.")))
+                        }
+                        return@withContext Result.success(Unit)
+                    }
+                }
+                Result.failure(Exception(parsePostgrestError(body, "Failed to update profile.")))
             }
         } catch (e: Exception) {
             Result.failure(Exception(ErrorSanitizer.sanitize(e, "Failed to update profile.")))
+        }
+    }
+
+    suspend fun equipAvatarFrame(
+        session: AuthSession,
+        baseAvatarKey: String,
+        frameKey: String?
+    ): Result<Pair<String, Int?>> = withContext(Dispatchers.IO) {
+        if (!AppConfig.isSupabaseConfigured) return@withContext Result.failure(Exception("Cloud account service is currently unavailable."))
+        val cleanFrame = BuiltInAvatarFrame.extractKey(frameKey)
+        val fallbackComposite = BuiltInAvatarFrame.composeAvatarKey(baseAvatarKey, cleanFrame)
+        try {
+            val rpcPayload = JSONObject().put("p_frame_key", cleanFrame ?: JSONObject.NULL)
+            val rpcReq = requestBuilder("/rest/v1/rpc/equip_avatar_frame", session.accessToken)
+                .post(rpcPayload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(rpcReq).execute().use { resp ->
+                val body = resp.body?.string().orEmpty().trim()
+                if (resp.isSuccessful) {
+                    if (body.startsWith("{")) {
+                        val obj = JSONObject(body)
+                        val resolvedKey = BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                            rawAvatarKey = obj.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" } ?: fallbackComposite,
+                            rawAvatarFrame = obj.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" } ?: cleanFrame
+                        )
+                        val serverXp = if (obj.has("xp") && !obj.isNull("xp")) obj.optInt("xp", 0).coerceAtLeast(0) else null
+                        return@withContext Result.success(resolvedKey to serverXp)
+                    }
+                    return@withContext Result.success(fallbackComposite to null)
+                }
+                val isMissingRpc = resp.code == 404 || body.contains("equip_avatar_frame", ignoreCase = true)
+                if (!isMissingRpc) {
+                    return@withContext Result.failure(Exception(parsePostgrestError(body, "Unable to update avatar frame.")))
+                }
+            }
+
+            // Graceful fallback when RPC migration has not yet been applied
+            val patchPayload = JSONObject()
+                .put("avatar_key", fallbackComposite)
+                .put("avatar_frame", cleanFrame ?: JSONObject.NULL)
+            val patchReq = requestBuilder("/rest/v1/profiles?id=eq.${session.userId}", session.accessToken)
+                .addHeader("Prefer", "return=minimal")
+                .patch(patchPayload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(patchReq).execute().use { patchResp ->
+                val patchBody = patchResp.body?.string().orEmpty()
+                if (patchResp.isSuccessful) {
+                    return@withContext Result.success(fallbackComposite to null)
+                }
+                if (patchBody.contains("avatar_frame", ignoreCase = true)) {
+                    patchPayload.remove("avatar_frame")
+                    val retryReq = requestBuilder("/rest/v1/profiles?id=eq.${session.userId}", session.accessToken)
+                        .addHeader("Prefer", "return=minimal")
+                        .patch(patchPayload.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+                    client.newCall(retryReq).execute().use { retryResp ->
+                        val retryBody = retryResp.body?.string().orEmpty()
+                        if (!retryResp.isSuccessful) {
+                            return@withContext Result.failure(Exception(parsePostgrestError(retryBody, "Unable to update avatar frame.")))
+                        }
+                        return@withContext Result.success(fallbackComposite to null)
+                    }
+                }
+                Result.failure(Exception(parsePostgrestError(patchBody, "Unable to update avatar frame.")))
+            }
+        } catch (e: Exception) {
+            Result.failure(Exception(ErrorSanitizer.sanitize(e, "Unable to update avatar frame.")))
         }
     }
 
@@ -1598,14 +1687,19 @@ class SupabaseDatabaseService {
                     val m = membersArr.getJSONObject(i)
                     val uid = m.getString("user_id")
                     val p = profileById[uid] ?: continue
+                    val rawAvatarKey = p.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+                    val rawAvatarFrame = p.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+                    val rawAvatarUrl = p.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
                     add(
                         CommunityMember(
                             userId = uid,
                             username = p.optString("username", "Member"),
-                            avatarKey = p.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
-                                ?: p.optString("avatar_url").takeIf { it.startsWith("avatar_") }
-                                ?: "avatar_1",
-                            avatarUrl = p.optString("avatar_url").takeIf {
+                            avatarKey = BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                                rawAvatarKey = rawAvatarKey,
+                                rawAvatarFrame = rawAvatarFrame,
+                                rawAvatarUrl = rawAvatarUrl
+                            ),
+                            avatarUrl = rawAvatarUrl?.takeIf {
                                 it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
                             },
                             bio = p.optString("bio", ""),
@@ -1677,7 +1771,7 @@ class SupabaseDatabaseService {
             if (missingUserIds.isNotEmpty()) {
                 runCatching {
                     val profReq = requestBuilder(
-                        "/rest/v1/profiles?id=in.(${missingUserIds.joinToString(",")})&select=id,username,avatar_key,avatar_url,role",
+                        "/rest/v1/profiles?id=in.(${missingUserIds.joinToString(",")})&select=*",
                         session.accessToken
                     ).get().build()
                     val cmReq = requestBuilder(
@@ -1702,13 +1796,18 @@ class SupabaseDatabaseService {
                                 val uid = p.optString("id")
                                 val mStatus = statusById[uid] ?: MemberStatus.ACTIVE
                                 if (uid.isNotBlank() && mStatus != MemberStatus.LEFT && mStatus != MemberStatus.REMOVED) {
+                                    val rawAvatarKey = p.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+                                    val rawAvatarFrame = p.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+                                    val rawAvatarUrl = p.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
                                     memberById[uid] = CommunityMember(
                                         userId = uid,
                                         username = p.optString("username", "Member"),
-                                        avatarKey = p.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
-                                            ?: p.optString("avatar_url").takeIf { it.startsWith("avatar_") }
-                                            ?: "avatar_1",
-                                        avatarUrl = p.optString("avatar_url").takeIf {
+                                        avatarKey = BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                                            rawAvatarKey = rawAvatarKey,
+                                            rawAvatarFrame = rawAvatarFrame,
+                                            rawAvatarUrl = rawAvatarUrl
+                                        ),
+                                        avatarUrl = rawAvatarUrl?.takeIf {
                                             it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
                                         },
                                         bio = "",

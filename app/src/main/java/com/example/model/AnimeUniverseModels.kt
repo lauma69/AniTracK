@@ -71,7 +71,7 @@ enum class BuiltInAvatar(
     companion object {
         fun fromKey(key: String?): BuiltInAvatar {
             if (key.isNullOrBlank()) return AVATAR_1
-            val cleaned = key.trim().lowercase()
+            val cleaned = key.substringBefore('|').trim().lowercase()
             entries.firstOrNull { it.key == cleaned || it.displayName.lowercase() == cleaned }?.let { return it }
             val match = Regex("""avatar[_-]?([1-9])""").find(cleaned)
                 ?: Regex("""^([1-9])$""").find(cleaned)
@@ -80,6 +80,67 @@ enum class BuiltInAvatar(
                 return entries[idx - 1]
             }
             return AVATAR_1
+        }
+    }
+}
+
+const val AVATAR_FRAME_UNLOCK_XP = 50
+
+enum class BuiltInAvatarFrame(
+    val key: String,
+    val displayName: String,
+    val accentColor: Color
+) {
+    FRAME_1("frame_1", "Moonlit Deer", Color(0xFF7DD3FC)),
+    FRAME_2("frame_2", "Sakura Kitsune", Color(0xFFF472B6)),
+    FRAME_3("frame_3", "Frost Dew", Color(0xFF93C5FD)),
+    FRAME_4("frame_4", "Sakura Crescent", Color(0xFFFBCFE8)),
+    FRAME_5("frame_5", "Obsidian Dragon", Color(0xFFC084FC)),
+    FRAME_6("frame_6", "Crimson Lantern", Color(0xFFF87171)),
+    FRAME_7("frame_7", "Spectral Lantern", Color(0xFF60A5FA)),
+    FRAME_8("frame_8", "Crimson Eclipse", Color(0xFFEF4444)),
+    FRAME_9("frame_9", "Astral Cube", Color(0xFF818CF8)),
+    FRAME_10("frame_10", "Lunar Seraph", Color(0xFFBAE6FD));
+
+    companion object {
+        private val frameRegex = Regex("""(?:^|\||:)frame[_-]?(10|[1-9])(?:\b|$)""", RegexOption.IGNORE_CASE)
+
+        fun extractKey(rawAvatarKey: String?, rawAvatarUrl: String? = null): String? {
+            val candidates = listOfNotNull(rawAvatarKey, rawAvatarUrl)
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            for (c in candidates) {
+                val match = frameRegex.find(c)
+                val idx = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (idx != null && idx in 1..10) {
+                    return "frame_$idx"
+                }
+            }
+            return null
+        }
+
+        fun fromRawKey(rawAvatarKey: String?, rawAvatarUrl: String? = null): BuiltInAvatarFrame? {
+            val key = extractKey(rawAvatarKey, rawAvatarUrl) ?: return null
+            return entries.firstOrNull { it.key == key }
+        }
+
+        fun composeAvatarKey(baseAvatarKey: String?, frameKey: String?): String {
+            val base = BuiltInAvatar.fromKey(baseAvatarKey).key
+            val cleanFrame = extractKey(frameKey)
+            return if (cleanFrame != null) "$base|$cleanFrame" else base
+        }
+
+        fun resolveCompositeAvatarKey(
+            rawAvatarKey: String?,
+            rawAvatarFrame: String? = null,
+            rawAvatarUrl: String? = null
+        ): String {
+            val baseSource = rawAvatarKey?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                ?: rawAvatarUrl?.takeIf { it.startsWith("avatar_", ignoreCase = true) }
+                ?: BuiltInAvatar.AVATAR_1.key
+            val base = BuiltInAvatar.fromKey(baseSource).key
+            val frame = extractKey(rawAvatarFrame) ?: extractKey(rawAvatarKey, rawAvatarUrl)
+            return if (frame != null) "$base|$frame" else base
         }
     }
 }
@@ -102,7 +163,8 @@ data class UserProfile(
     val role: String = "member",
     val canGenerateInvites: Boolean = false,
     val memberStatus: MemberStatus = MemberStatus.ACTIVE,
-    val joinedAt: String? = null
+    val joinedAt: String? = null,
+    val xp: Int = 0
 ) {
     val isAdmin: Boolean
         get() = role.equals("admin", ignoreCase = true)

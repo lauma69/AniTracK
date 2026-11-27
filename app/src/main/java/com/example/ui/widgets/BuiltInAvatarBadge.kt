@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.model.BuiltInAvatar
+import com.example.model.BuiltInAvatarFrame
 import com.example.ui.theme.AppTheme
 import com.example.ui.theme.ChampagneGold
 import com.example.ui.theme.ChampagneGoldBright
@@ -72,44 +73,82 @@ fun BuiltInAvatar.drawableRes(): Int = when (this) {
     BuiltInAvatar.AVATAR_9 -> R.drawable.avatar_9
 }
 
+@DrawableRes
+fun BuiltInAvatarFrame.drawableRes(): Int = when (this) {
+    BuiltInAvatarFrame.FRAME_1 -> R.drawable.avatar_frame_1
+    BuiltInAvatarFrame.FRAME_2 -> R.drawable.avatar_frame_2
+    BuiltInAvatarFrame.FRAME_3 -> R.drawable.avatar_frame_3
+    BuiltInAvatarFrame.FRAME_4 -> R.drawable.avatar_frame_4
+    BuiltInAvatarFrame.FRAME_5 -> R.drawable.avatar_frame_5
+    BuiltInAvatarFrame.FRAME_6 -> R.drawable.avatar_frame_6
+    BuiltInAvatarFrame.FRAME_7 -> R.drawable.avatar_frame_7
+    BuiltInAvatarFrame.FRAME_8 -> R.drawable.avatar_frame_8
+    BuiltInAvatarFrame.FRAME_9 -> R.drawable.avatar_frame_9
+    BuiltInAvatarFrame.FRAME_10 -> R.drawable.avatar_frame_10
+}
+
 @Composable
 fun MemberAvatar(
     avatarKey: String?,
     avatarUrl: String?,
     username: String,
     size: Dp = 48.dp,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    frameOverride: BuiltInAvatarFrame? = null,
+    suppressFrame: Boolean = false
 ) {
     val effectiveKey = avatarKey?.takeIf { it.isNotBlank() && it != "null" }
         ?: avatarUrl?.takeIf { !it.startsWith("http", ignoreCase = true) }
     val preset = BuiltInAvatar.fromKey(effectiveKey)
+    val frame = if (suppressFrame) null else (frameOverride ?: BuiltInAvatarFrame.fromRawKey(avatarKey, avatarUrl))
     val validRemoteUrl = avatarUrl?.trim()?.takeIf {
         it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
     }
+
+    val containerSize = if (frame != null) size * 1.38f else size
+    val innerAvatarSize = if (frame != null) size else size
+
     Box(
-        modifier = modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(
-                Brush.linearGradient(
-                    listOf(preset.primaryColor.copy(alpha = 0.25f), preset.secondaryColor.copy(alpha = 0.25f))
-                )
-            )
-            .border(1.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.55f), CircleShape),
+        modifier = modifier.size(containerSize),
         contentAlignment = Alignment.Center
     ) {
-        Image(
-            painter = painterResource(id = preset.drawableRes()),
-            contentDescription = "$username avatar (${preset.displayName})",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize().clip(CircleShape)
-        )
-        if (validRemoteUrl != null) {
-            AsyncImage(
-                model = validRemoteUrl,
-                contentDescription = "$username avatar",
+        Box(
+            modifier = Modifier
+                .size(innerAvatarSize)
+                .clip(CircleShape)
+                .background(
+                    Brush.linearGradient(
+                        listOf(preset.primaryColor.copy(alpha = 0.25f), preset.secondaryColor.copy(alpha = 0.25f))
+                    )
+                )
+                .border(
+                    width = if (frame != null) 1.dp else 1.5.dp,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = if (frame != null) 0.28f else 0.55f),
+                    shape = CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painterResource(id = preset.drawableRes()),
+                contentDescription = "$username avatar (${preset.displayName})",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().clip(CircleShape)
+            )
+            if (validRemoteUrl != null) {
+                AsyncImage(
+                    model = validRemoteUrl,
+                    contentDescription = "$username avatar",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().clip(CircleShape)
+                )
+            }
+        }
+        if (frame != null) {
+            Image(
+                painter = painterResource(id = frame.drawableRes()),
+                contentDescription = "${frame.displayName} avatar frame",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
             )
         }
     }
@@ -128,6 +167,7 @@ fun RoundAvatarCarousel(
     darkSurface: Boolean = false
 ) {
     val colors = AppTheme.colors
+    val normalizedSelectedKey = BuiltInAvatar.fromKey(selectedKey).key
     LazyRow(
         modifier = modifier
             .fillMaxWidth()
@@ -137,7 +177,7 @@ fun RoundAvatarCarousel(
         verticalAlignment = Alignment.CenterVertically
     ) {
         items(BuiltInAvatar.entries, key = { it.key }) { avatar ->
-            val isSelected = selectedKey == avatar.key
+            val isSelected = normalizedSelectedKey == avatar.key
             val scale by animateFloatAsState(
                 targetValue = if (isSelected) 1.12f else 0.96f,
                 animationSpec = spring(

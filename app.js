@@ -67,6 +67,21 @@ const BUILT_IN_AVATARS = [
   { key: 'avatar_9', name: 'Solar Halo', img: '/assets/avatar_9.png', c1: '#FBBF24', c2: '#64748B' }
 ];
 
+const AVATAR_FRAME_UNLOCK_XP = 50;
+
+const BUILT_IN_AVATAR_FRAMES = [
+  { key: 'frame_1', name: 'Moonlit Deer', img: '/assets/frames/frame_1.png', accent: '#7DD3FC' },
+  { key: 'frame_2', name: 'Sakura Kitsune', img: '/assets/frames/frame_2.png', accent: '#F472B6' },
+  { key: 'frame_3', name: 'Frost Dew', img: '/assets/frames/frame_3.png', accent: '#93C5FD' },
+  { key: 'frame_4', name: 'Sakura Crescent', img: '/assets/frames/frame_4.png', accent: '#FBCFE8' },
+  { key: 'frame_5', name: 'Obsidian Dragon', img: '/assets/frames/frame_5.png', accent: '#C084FC' },
+  { key: 'frame_6', name: 'Crimson Lantern', img: '/assets/frames/frame_6.png', accent: '#F87171' },
+  { key: 'frame_7', name: 'Spectral Lantern', img: '/assets/frames/frame_7.png', accent: '#60A5FA' },
+  { key: 'frame_8', name: 'Crimson Eclipse', img: '/assets/frames/frame_8.png', accent: '#EF4444' },
+  { key: 'frame_9', name: 'Astral Cube', img: '/assets/frames/frame_9.png', accent: '#818CF8' },
+  { key: 'frame_10', name: 'Lunar Seraph', img: '/assets/frames/frame_10.png', accent: '#BAE6FD' }
+];
+
 const SANDRONE_IMAGE_SRC = '/assets/sandrone/sandrone.png';
 const SANDRONE_VOICE_CLIPS = [
   '/assets/sandrone/s.mp3',
@@ -729,6 +744,7 @@ function readScopedProfile(sessionObj, isGuest, guestId) {
       userId: sessionObj ? sessionObj.userId : guestId,
       username: parsed.username || defaultUsername,
       avatarKey: parsed.avatarKey || 'avatar_1',
+      xp: Number(parsed.xp || 0),
       bio: parsed.bio || '',
       memberStatus: parsed.memberStatus || (isGuest ? 'guest' : 'active'),
       isAdmin: Boolean(parsed.isAdmin)
@@ -788,6 +804,7 @@ const state = {
   // Profile State (Isolated to active user or active guest)
   profile: readScopedProfile(initialSession, initialGuestMode, initialGuestId),
   showAvatarModal: false,
+  showAvatarFramesModal: false,
   showProfileEditModal: false,
 
   // Home Schedule State (Strictly independent from Library & Community)
@@ -1233,13 +1250,64 @@ function getMascotImgUrl() {
 function normalizeAvatarKey(rawKey, rawUrl = '') {
   const candidates = [rawKey, rawUrl].map((v) => String(v || '').trim()).filter((v) => v && v !== 'null');
   for (const c of candidates) {
-    const lower = c.toLowerCase();
+    const basePart = c.split('|')[0].trim();
+    const lower = basePart.toLowerCase();
     const exact = BUILT_IN_AVATARS.find((a) => a.key === lower || a.name.toLowerCase() === lower);
     if (exact) return exact.key;
     const m = lower.match(/avatar[_-]?([1-9])/) || lower.match(/^([1-9])$/);
     if (m && m[1]) return `avatar_${m[1]}`;
   }
   return 'avatar_1';
+}
+
+function extractAvatarFrameKey(rawKey, rawUrl = '', rawFrame = '') {
+  const candidates = [rawFrame, rawKey, rawUrl]
+    .map((v) => String(v || '').trim())
+    .filter((v) => v && v !== 'null');
+  for (const c of candidates) {
+    const lower = c.toLowerCase();
+    const m = lower.match(/(?:^|\||:)frame[_-]?(10|[1-9])(?:\b|$)/);
+    if (m && m[1]) return `frame_${m[1]}`;
+  }
+  return '';
+}
+
+function composeAvatarKey(baseAvatarKey, frameKey = '') {
+  const base = normalizeAvatarKey(baseAvatarKey);
+  const frame = extractAvatarFrameKey(frameKey);
+  return frame ? `${base}|${frame}` : base;
+}
+
+function normalizeAvatarCompositeKey(rawKey, rawUrl = '', rawFrame = '') {
+  const base = normalizeAvatarKey(rawKey, rawUrl);
+  const frame = extractAvatarFrameKey(rawKey, rawUrl, rawFrame);
+  return frame ? `${base}|${frame}` : base;
+}
+
+function getAvatarFramePreset(avatarKey, avatarUrl = '', rawFrame = '') {
+  const fKey = extractAvatarFrameKey(avatarKey, avatarUrl, rawFrame);
+  if (!fKey) return null;
+  return BUILT_IN_AVATAR_FRAMES.find((f) => f.key === fKey) || null;
+}
+
+function getUserXp() {
+  const progressIds = new Set();
+  if (Array.isArray(state.vault)) {
+    state.vault.forEach((v) => {
+      if ((Number(v?.rating10) || 0) > 0 && v?.animeId != null) {
+        progressIds.add(Number(v.animeId));
+      }
+    });
+  }
+  if (state.session?.userId && Array.isArray(state.communityReviews)) {
+    state.communityReviews.forEach((r) => {
+      if (r?.user_id === state.session.userId && (Number(r?.rating) || 0) > 0 && r?.anime_id != null) {
+        progressIds.add(Number(r.anime_id));
+      }
+    });
+  }
+  const serverXp = Math.max(0, Number(state.profile?.xp || 0));
+  return Math.max(serverXp, progressIds.size);
 }
 
 function getAvatarPreset(avatarKey, avatarUrl = '') {
@@ -1256,13 +1324,26 @@ function getAvatarImgUrl(avatarKey, avatarUrl = '') {
   return getAvatarPreset(avatarKey, avatarUrl).img;
 }
 
-function renderAvatarCircle(avatarKey, username = 'A', sizePx = 28, avatarUrl = '') {
+function renderAvatarCircle(avatarKey, username = 'A', sizePx = 28, avatarUrl = '', frameKeyOverride = undefined) {
   const av = getAvatarPreset(avatarKey, avatarUrl);
+  const frame =
+    frameKeyOverride !== undefined
+      ? getAvatarFramePreset(frameKeyOverride)
+      : getAvatarFramePreset(avatarKey, avatarUrl);
   const initial = String(username || 'A').trim().charAt(0).toUpperCase() || 'A';
+  const frameSize = Math.round(sizePx * 1.38);
+  const frameMargin = frame ? Math.max(2, Math.round(sizePx * 0.14)) : 0;
   return `
-    <div style="position:relative;width:${sizePx}px;height:${sizePx}px;border-radius:50%;overflow:hidden;border:1.5px solid rgba(255,255,255,0.32);background:linear-gradient(135deg,${av.c1},${av.c2});flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;">
-      <span style="position:absolute;color:#FFF;font-size:${Math.max(10, Math.round(sizePx * 0.44))}px;font-weight:700;pointer-events:none;">${escapeHtml(initial)}</span>
-      <img src="${av.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" style="position:relative;z-index:1;width:100%;height:100%;object-fit:cover;display:block;border-radius:50%;" />
+    <div class="avatar-framed-wrap${frame ? ' has-frame' : ''}" style="position:relative;width:${sizePx}px;height:${sizePx}px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;overflow:visible;${frameMargin ? `margin:${frameMargin}px;` : ''}">
+      <div style="position:relative;width:100%;height:100%;border-radius:50%;overflow:hidden;border:${frame ? '1px solid rgba(255,255,255,0.18)' : '1.5px solid rgba(255,255,255,0.32)'};background:linear-gradient(135deg,${av.c1},${av.c2});display:inline-flex;align-items:center;justify-content:center;">
+        <span style="position:absolute;color:#FFF;font-size:${Math.max(10, Math.round(sizePx * 0.44))}px;font-weight:700;pointer-events:none;">${escapeHtml(initial)}</span>
+        <img src="${av.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" style="position:relative;z-index:1;width:100%;height:100%;object-fit:cover;display:block;border-radius:50%;" />
+      </div>
+      ${
+        frame
+          ? `<img class="avatar-frame-overlay" src="${frame.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" style="width:${frameSize}px;height:${frameSize}px;" />`
+          : ''
+      }
     </div>
   `;
 }
@@ -2160,7 +2241,8 @@ async function loadCloudData(silent = false) {
       state.profile = {
         userId: activeUserId,
         username: isPlaceholderOrEmailName(loadedName) ? 'Member' : loadedName,
-        avatarKey: normalizeAvatarKey(p.avatar_key, p.avatar_url),
+        avatarKey: normalizeAvatarCompositeKey(p.avatar_key, p.avatar_url, p.avatar_frame),
+        xp: Math.max(0, Number(p.xp || 0)),
         bio: p.bio || '',
         memberStatus: cmStatus || p.member_status || 'active',
         isAdmin: Boolean(p.is_admin)
@@ -2192,6 +2274,7 @@ async function loadCloudData(silent = false) {
       Boolean(state.communityCommentsAnimeId !== null) ||
       Boolean(state.quickEditAnime) ||
       Boolean(state.showAvatarModal) ||
+      Boolean(state.showAvatarFramesModal) ||
       Boolean(state.confirmRemoveHomeAnime) ||
       Boolean(state.tab === 'detail') ||
       hasUnsavedDetailDraft ||
@@ -2350,7 +2433,7 @@ async function loadCommunityReviews() {
 
     const [profRows, reviewLikeRows, noteLikeRows] = await Promise.all([
       userIds.length > 0
-        ? supabaseRequest(`/rest/v1/profiles?id=in.(${userIds.join(',')})&select=id,username,avatar_key,avatar_url`).catch(() => [])
+        ? supabaseRequest(`/rest/v1/profiles?id=in.(${userIds.join(',')})&select=*`).catch(() => [])
         : Promise.resolve([]),
       reviewIds.length > 0
         ? supabaseRequest(`/rest/v1/review_likes?review_id=in.(${reviewIds.join(',')})&select=review_id,user_id`).catch(() => [])
@@ -2365,7 +2448,7 @@ async function loadCommunityReviews() {
       profRows.forEach((p) => {
         profMap[p.id] = {
           username: p.username || 'Member',
-          avatar_key: normalizeAvatarKey(p.avatar_key, p.avatar_url)
+          avatar_key: normalizeAvatarCompositeKey(p.avatar_key, p.avatar_url, p.avatar_frame)
         };
       });
     }
@@ -5484,14 +5567,14 @@ const DiscussionRealtimeManager = {
     }
     try {
       const rows = await supabaseRequest(
-        `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=id,username,avatar_key,avatar_url&limit=1`,
+        `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=*&limit=1`,
         'GET'
       );
       const p = Array.isArray(rows) ? rows[0] : null;
       if (p) {
         const resolved = {
           username: p.username || 'Member',
-          avatar_key: p.avatar_key || 'avatar_1',
+          avatar_key: normalizeAvatarCompositeKey(p.avatar_key, p.avatar_url, p.avatar_frame),
           avatar_url: p.avatar_url || null
         };
         this.profileCache.set(userId, resolved);
@@ -7020,6 +7103,7 @@ async function removeFromVault(animeId) {
 
 function renderObsidianTopBar({ title, accentTitleTail = null, subtitle, leftActionHtml = '', actionsHtml = '' }) {
   const av = getAvatarPreset(state.profile.avatarKey);
+  const frame = getAvatarFramePreset(state.profile.avatarKey);
   const initial = String(state.profile.username || 'A').trim().charAt(0).toUpperCase() || 'A';
   return `
     <header class="obsidian-topbar">
@@ -7036,9 +7120,16 @@ function renderObsidianTopBar({ title, accentTitleTail = null, subtitle, leftAct
       </div>
       <div class="topbar-right">
         ${actionsHtml}
-        <button class="profile-avatar-btn" data-nav="profile" title="Open Profile" style="position:relative;background:linear-gradient(135deg,${av.c1},${av.c2});display:inline-flex;align-items:center;justify-content:center;">
-          <span style="position:absolute;color:#FFF;font-size:15px;font-weight:700;pointer-events:none;">${escapeHtml(initial)}</span>
-          <img src="${av.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" style="position:relative;z-index:1;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;" />
+        <button class="profile-avatar-btn${frame ? ' has-frame' : ''}" data-nav="profile" title="Open Profile">
+          <span class="profile-avatar-inner" style="background:linear-gradient(135deg,${av.c1},${av.c2});">
+            <span style="position:absolute;color:#FFF;font-size:15px;font-weight:700;pointer-events:none;">${escapeHtml(initial)}</span>
+            <img src="${av.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" style="position:relative;z-index:1;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;" />
+          </span>
+          ${
+            frame
+              ? `<img class="avatar-frame-overlay" src="${frame.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" style="width:58px;height:58px;" />`
+              : ''
+          }
         </button>
       </div>
     </header>
@@ -8104,6 +8195,7 @@ function renderCommunityScreen() {
 
 function renderProfileScreen() {
   const ratedItems = state.vault.filter((v) => (v.rating10 || 0) > 0);
+  const userXp = getUserXp();
   const watchedCount = state.vault.filter((v) => (v.watchedEpisodes || 0) >= 1).length;
   const meanScore =
     ratedItems.length > 0
@@ -8111,7 +8203,9 @@ function renderProfileScreen() {
       : '—';
   const favorites = state.vault.filter((v) => v.isFavorite);
   const avPreset = getAvatarPreset(state.profile.avatarKey);
+  const activeFrame = getAvatarFramePreset(state.profile.avatarKey);
   const avatarImg = avPreset.img;
+  const framesUnlocked = userXp >= AVATAR_FRAME_UNLOCK_XP;
 
   return `
     <div style="max-width:760px;margin:0 auto;">
@@ -8121,12 +8215,17 @@ function renderProfileScreen() {
         <button class="app-icon-btn" data-nav="settings" title="Settings">${SVG_ICONS.settings}</button>
       </div>
 
-      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 0 18px;">
-        <div id="btn-open-avatar-modal" style="position:relative;width:108px;height:108px;cursor:pointer;" title="Tap to change portrait">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 0 18px;">
+        <div id="btn-open-avatar-modal" style="position:relative;width:108px;height:108px;cursor:pointer;overflow:visible;display:flex;align-items:center;justify-content:center;${activeFrame ? 'margin:16px 0;' : ''}" title="Tap to change portrait">
           <div style="width:104px;height:104px;border-radius:50%;padding:3px;background:linear-gradient(135deg,${avPreset.c1},${avPreset.c2});box-shadow:0 12px 32px var(--accent-soft);">
             <img src="${avatarImg}" alt="" onerror="${AVATAR_IMG_ONERROR}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;border:2.5px solid var(--bg-main);display:block;" />
           </div>
-          <div style="position:absolute;bottom:2px;right:2px;width:28px;height:28px;border-radius:50%;background:var(--accent-primary);color:var(--on-accent);border:2px solid var(--bg-main);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;">✎</div>
+          ${
+            activeFrame
+              ? `<img class="avatar-frame-overlay" src="${activeFrame.img}" alt="${escapeHtml(activeFrame.name)}" onerror="${AVATAR_IMG_ONERROR}" style="width:146px;height:146px;" />`
+              : ''
+          }
+          <div style="position:absolute;bottom:0;right:0;z-index:4;width:28px;height:28px;border-radius:50%;background:var(--accent-primary);color:var(--on-accent);border:2px solid var(--bg-main);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;">✎</div>
         </div>
 
         <div id="btn-open-profile-edit" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px 12px;border-radius:14px;">
@@ -8135,13 +8234,13 @@ function renderProfileScreen() {
         </div>
 
         <div class="micro-label" style="color:var(--text-muted);letter-spacing:1.6px;">
-          ${state.session ? 'COMMUNITY MEMBER' : 'LOCAL VAULT'}
+          ${state.session ? 'COMMUNITY MEMBER' : 'LOCAL VAULT'}${activeFrame ? ` • ${escapeHtml(activeFrame.name.toUpperCase())}` : ''}
         </div>
       </div>
 
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;">
         ${[
-          { label: 'RATED', val: ratedItems.length },
+          { label: 'XP', val: userXp },
           { label: 'WATCHED', val: watchedCount },
           { label: 'SAVED', val: state.vault.length },
           { label: 'MEAN', val: meanScore }
@@ -8156,6 +8255,42 @@ function renderProfileScreen() {
           .join('')}
       </div>
 
+      <button
+        type="button"
+        id="btn-open-avatar-frames"
+        class="app-card clickable avatar-frames-trigger-btn"
+        style="width:100%;margin-bottom:16px;text-align:left;"
+      >
+        <div class="avatar-frames-trigger-left">
+          <div class="avatar-frames-trigger-preview">
+            ${renderAvatarCircle(
+              state.profile.avatarKey,
+              state.profile.username || 'A',
+              42,
+              '',
+              activeFrame ? activeFrame.key : 'frame_1'
+            )}
+          </div>
+          <div style="min-width:0;">
+            <div class="micro-label" style="color:var(--accent-primary);letter-spacing:1.8px;">COLLECTOR COSMETICS</div>
+            <div class="serif-heading" style="font-size:22px;line-height:1.15;margin-top:2px;">Avatar Frames</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+              ${
+                activeFrame
+                  ? `Equipped: ${escapeHtml(activeFrame.name)} • All avatars`
+                  : '10 Collector Frames • Usable on all avatars'
+              }
+            </div>
+          </div>
+        </div>
+        <div class="avatar-frames-trigger-right">
+          <span class="avatar-frames-status-pill ${framesUnlocked ? 'unlocked' : 'locked'}">
+            ${framesUnlocked ? '★ UNLOCKED' : `🔒 ${userXp} / ${AVATAR_FRAME_UNLOCK_XP} XP`}
+          </span>
+          <span style="color:var(--accent-primary);font-size:20px;line-height:1;">›</span>
+        </div>
+      </button>
+
       <div class="app-card" style="background:linear-gradient(135deg,var(--accent-soft),var(--card-bg));border-color:var(--accent-border);margin-bottom:16px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
           <span class="micro-label" style="color:var(--accent-primary);letter-spacing:2px;">COMMUNITY STATUS</span>
@@ -8167,7 +8302,7 @@ function renderProfileScreen() {
         <p style="font-size:13px;color:var(--text-secondary);line-height:1.5;">
           ${
             state.session
-              ? 'Your rated & noted anime showcases sync automatically across Android, Web, and PC.'
+              ? 'Your profile showcase and frames sync automatically across Android, Web, and PC.'
               : 'Sign in anytime from Settings to sync your library and join the community.'
           }
         </p>
@@ -10051,17 +10186,113 @@ function renderModals() {
           <h3 class="serif-heading" style="font-size:24px;text-align:center;">Choose Your Avatar</h3>
           <div class="round-avatar-carousel">
             ${BUILT_IN_AVATARS.map(
-              (av) => `
-              <div class="avatar-carousel-item ${state.profile.avatarKey === av.key ? 'selected' : ''}" data-pick-avatar="${av.key}">
+              (av) => {
+                const isSelectedBase = normalizeAvatarKey(state.profile.avatarKey) === av.key;
+                return `
+              <div class="avatar-carousel-item ${isSelectedBase ? 'selected' : ''}" data-pick-avatar="${av.key}">
                 <div class="avatar-ring-wrap" style="background:linear-gradient(135deg,${av.c1},${av.c2});">
                   <img src="${av.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" />
-                  ${state.profile.avatarKey === av.key ? `<div class="avatar-check-badge">✓</div>` : ''}
+                  ${isSelectedBase ? `<div class="avatar-check-badge">✓</div>` : ''}
                 </div>
                 <span style="font-size:11px;color:var(--text-secondary);">${escapeHtml(av.name)}</span>
-              </div>`
+              </div>`;
+              }
             ).join('')}
           </div>
           <button class="btn-secondary" id="btn-close-modal" style="width:100%;">Done</button>
+        </div>
+      </div>
+    `;
+  }
+
+  if (state.showAvatarFramesModal) {
+    const avPreset = getAvatarPreset(state.profile.avatarKey);
+    const activeFrameKey = extractAvatarFrameKey(state.profile.avatarKey);
+    const activeFrame = getAvatarFramePreset(state.profile.avatarKey);
+    const userXp = getUserXp();
+    const framesUnlocked = userXp >= AVATAR_FRAME_UNLOCK_XP;
+    const remainingXp = Math.max(0, AVATAR_FRAME_UNLOCK_XP - userXp);
+    const xpProgressPct = Math.min(100, Math.round((userXp / AVATAR_FRAME_UNLOCK_XP) * 100));
+
+    return `
+      <div class="modal-backdrop" id="modal-backdrop">
+        <div class="modal-sheet avatar-frames-modal-sheet" onclick="event.stopPropagation()">
+          <div class="avatar-frames-header" style="align-items:center;">
+            <div>
+              <div class="micro-label" style="color:var(--accent-primary);letter-spacing:2px;">COLLECTOR COSMETICS</div>
+              <h3 class="serif-heading" style="font-size:25px;margin-top:2px;">Avatar Frames</h3>
+            </div>
+            <button type="button" class="hub-close" id="btn-close-modal" aria-label="Close">✕</button>
+          </div>
+
+          <div class="avatar-frames-hero-preview">
+            ${renderAvatarCircle(state.profile.avatarKey, state.profile.username || 'A', 84)}
+            <div style="text-align:center;">
+              <div style="font-size:14px;font-weight:700;color:var(--text-primary);">
+                ${activeFrame ? escapeHtml(activeFrame.name) : 'No Frame Equipped'}
+              </div>
+              <div style="font-size:11.5px;color:var(--text-secondary);margin-top:2px;">
+                Usable on all avatars • Visible to all users
+              </div>
+            </div>
+            <span class="avatar-frames-status-pill ${framesUnlocked ? 'unlocked' : 'locked'}">
+              ${framesUnlocked ? `★ ${userXp} XP • UNLOCKED` : `🔒 ${userXp} / ${AVATAR_FRAME_UNLOCK_XP} XP`}
+            </span>
+          </div>
+
+          <p class="avatar-frames-desc" style="margin-bottom:8px;text-align:center;">
+            ${
+              framesUnlocked
+                ? 'You have 50+ XP! Equip any frame below across any avatar — visible to everyone in Community & Chat.'
+                : `Unlock all 10 collector frames at ${AVATAR_FRAME_UNLOCK_XP} XP (${remainingXp} XP remaining).`
+            }
+          </p>
+
+          <div class="avatar-frames-progress-wrap">
+            <div class="avatar-frames-progress-track">
+              <div class="avatar-frames-progress-fill" style="width:${xpProgressPct}%;"></div>
+            </div>
+            <span class="avatar-frames-progress-label tabular-num">${Math.min(userXp, AVATAR_FRAME_UNLOCK_XP)}/${AVATAR_FRAME_UNLOCK_XP} XP</span>
+          </div>
+
+          <div class="avatar-frames-grid avatar-frames-modal-grid">
+            <button
+              type="button"
+              class="avatar-frame-tile ${!activeFrameKey ? 'selected' : ''}"
+              data-pick-avatar-frame=""
+              title="Use default portrait without a frame"
+            >
+              <div class="avatar-frame-preview-stage">
+                <div class="avatar-frame-preview-circle" style="background:linear-gradient(135deg,${avPreset.c1},${avPreset.c2});">
+                  <img src="${avPreset.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" />
+                </div>
+                ${!activeFrameKey ? `<div class="avatar-frame-check-badge">✓</div>` : ''}
+              </div>
+              <span class="avatar-frame-tile-name">None</span>
+            </button>
+
+            ${BUILT_IN_AVATAR_FRAMES.map((fr) => {
+              const isSelected = activeFrameKey === fr.key;
+              return `
+                <button
+                  type="button"
+                  class="avatar-frame-tile ${isSelected ? 'selected' : ''} ${!framesUnlocked ? 'is-locked' : ''}"
+                  data-pick-avatar-frame="${fr.key}"
+                  title="${framesUnlocked ? `Equip ${escapeHtml(fr.name)}` : `Requires ${AVATAR_FRAME_UNLOCK_XP} XP to unlock`}"
+                >
+                  <div class="avatar-frame-preview-stage">
+                    <div class="avatar-frame-preview-circle" style="background:linear-gradient(135deg,${avPreset.c1},${avPreset.c2});">
+                      <img src="${avPreset.img}" alt="" onerror="${AVATAR_IMG_ONERROR}" />
+                    </div>
+                    <img class="avatar-frame-overlay" src="${fr.img}" alt="${escapeHtml(fr.name)}" onerror="${AVATAR_IMG_ONERROR}" style="width:82px;height:82px;" />
+                    ${isSelected ? `<div class="avatar-frame-check-badge">✓</div>` : ''}
+                    ${!framesUnlocked ? `<div class="avatar-frame-lock-badge" aria-label="Locked">🔒</div>` : ''}
+                  </div>
+                  <span class="avatar-frame-tile-name">${escapeHtml(fr.name)}</span>
+                </button>
+              `;
+            }).join('')}
+          </div>
         </div>
       </div>
     `;
@@ -12429,6 +12660,8 @@ function bindAppEvents() {
   // Profile & Settings events
   const openAv = document.getElementById('btn-open-avatar-modal');
   if (openAv) openAv.onclick = () => { state.showAvatarModal = true; renderApp(); };
+  const openAvFrames = document.getElementById('btn-open-avatar-frames');
+  if (openAvFrames) openAvFrames.onclick = () => { state.showAvatarFramesModal = true; renderApp(); };
   const openProfEdit = document.getElementById('btn-open-profile-edit');
   if (openProfEdit) openProfEdit.onclick = () => { state.showProfileEditModal = true; renderApp(); };
 
@@ -13170,6 +13403,7 @@ function bindAppEvents() {
   const closeModals = () => {
     state.quickEditAnime = null;
     state.showAvatarModal = false;
+    state.showAvatarFramesModal = false;
     state.showProfileEditModal = false;
     state.showCreateCollectionModal = false;
     state.communityCommentsAnimeId = null;
@@ -13247,15 +13481,99 @@ function bindAppEvents() {
     };
   }
 
+  const syncOwnAvatarAcrossViews = (compositeKey) => {
+    const myId = state.session?.userId;
+    if (!myId) return;
+    if (Array.isArray(state.communityReviews)) {
+      state.communityReviews.forEach((r) => {
+        if (r && r.user_id === myId) r.avatar_key = compositeKey;
+      });
+    }
+    if (Array.isArray(state.communityComments)) {
+      state.communityComments.forEach((c) => {
+        if (c && c.user_id === myId) c.avatar_key = compositeKey;
+      });
+    }
+  };
+
   document.querySelectorAll('[data-pick-avatar]').forEach((el) => {
     el.onclick = async () => {
-      const key = normalizeAvatarKey(el.getAttribute('data-pick-avatar'));
-      state.profile.avatarKey = key;
+      const baseKey = normalizeAvatarKey(el.getAttribute('data-pick-avatar'));
+      const currentFrame = extractAvatarFrameKey(state.profile.avatarKey);
+      const nextComposite = composeAvatarKey(baseKey, currentFrame);
+      state.profile.avatarKey = nextComposite;
+      syncOwnAvatarAcrossViews(nextComposite);
       saveProfileCache();
       renderApp();
       if (state.session) {
         const uid = encodeURIComponent(state.session.userId);
-        await supabaseRequest(`/rest/v1/profiles?id=eq.${uid}`, 'PATCH', { avatar_key: key, avatar_url: null }).catch(() => {});
+        try {
+          await supabaseRequest(`/rest/v1/profiles?id=eq.${uid}`, 'PATCH', {
+            avatar_key: nextComposite,
+            avatar_frame: currentFrame || null,
+            avatar_url: null
+          });
+        } catch (_) {
+          await supabaseRequest(`/rest/v1/profiles?id=eq.${uid}`, 'PATCH', {
+            avatar_key: nextComposite,
+            avatar_url: null
+          }).catch(() => {});
+        }
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-pick-avatar-frame]').forEach((el) => {
+    el.onclick = async () => {
+      const rawFrame = String(el.getAttribute('data-pick-avatar-frame') || '').trim();
+      const targetFrame = rawFrame ? extractAvatarFrameKey(rawFrame) : '';
+      const userXp = getUserXp();
+      if (targetFrame && userXp < AVATAR_FRAME_UNLOCK_XP) {
+        showToast(
+          `Requires ${AVATAR_FRAME_UNLOCK_XP} XP to unlock Avatar Frames (${userXp}/${AVATAR_FRAME_UNLOCK_XP} XP).`
+        );
+        return;
+      }
+      const baseKey = normalizeAvatarKey(state.profile.avatarKey);
+      const nextComposite = composeAvatarKey(baseKey, targetFrame);
+      if (state.profile.avatarKey === nextComposite) return;
+      state.profile.avatarKey = nextComposite;
+      syncOwnAvatarAcrossViews(nextComposite);
+      saveProfileCache();
+      const chosenPreset = getAvatarFramePreset(targetFrame);
+      showToast(chosenPreset ? `Equipped "${chosenPreset.name}" avatar frame!` : 'Avatar frame removed.');
+      renderApp();
+      if (state.session) {
+        const uid = encodeURIComponent(state.session.userId);
+        let syncedViaRpc = false;
+        try {
+          const rpcRes = await supabaseRequest('/rest/v1/rpc/equip_avatar_frame', 'POST', {
+            p_frame_key: targetFrame || null
+          });
+          if (rpcRes && typeof rpcRes === 'object') {
+            syncedViaRpc = true;
+            if (typeof rpcRes.xp === 'number') {
+              state.profile.xp = rpcRes.xp;
+              saveProfileCache();
+            }
+          }
+        } catch (_) {
+          syncedViaRpc = false;
+        }
+        if (!syncedViaRpc) {
+          try {
+            await supabaseRequest(`/rest/v1/profiles?id=eq.${uid}`, 'PATCH', {
+              avatar_key: nextComposite,
+              avatar_frame: targetFrame || null,
+              avatar_url: null
+            });
+          } catch (_) {
+            await supabaseRequest(`/rest/v1/profiles?id=eq.${uid}`, 'PATCH', {
+              avatar_key: nextComposite,
+              avatar_url: null
+            }).catch(() => {});
+          }
+        }
       }
     };
   });

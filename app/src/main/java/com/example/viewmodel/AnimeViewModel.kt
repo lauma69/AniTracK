@@ -2969,6 +2969,45 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun equipAvatarFrame(frameKey: String?, userXp: Int) {
+        val session = _authSession.value
+        val current = _userProfile.value
+        val cleanFrame = com.example.model.BuiltInAvatarFrame.extractKey(frameKey)
+        val effectiveXp = maxOf(current?.xp ?: 0, userXp)
+        if (cleanFrame != null && effectiveXp < com.example.model.AVATAR_FRAME_UNLOCK_XP) {
+            _userMessage.value =
+                "Requires ${com.example.model.AVATAR_FRAME_UNLOCK_XP} XP to unlock Avatar Frames ($effectiveXp/${com.example.model.AVATAR_FRAME_UNLOCK_XP} XP)."
+            return
+        }
+        if (current == null || session == null) {
+            _userMessage.value = "Sign in to equip and share Avatar Frames with all users."
+            return
+        }
+        val nextComposite = com.example.model.BuiltInAvatarFrame.composeAvatarKey(current.avatarKey, cleanFrame)
+        if (current.avatarKey == nextComposite) return
+        val chosenFrame = com.example.model.BuiltInAvatarFrame.fromRawKey(cleanFrame)
+        viewModelScope.launch {
+            _isProfileSaving.value = true
+            _profileError.value = null
+            supabaseDb.equipAvatarFrame(session, current.avatarKey, cleanFrame).onSuccess { (resolvedKey, serverXp) ->
+                _userProfile.value = current.copy(
+                    avatarKey = resolvedKey,
+                    xp = serverXp ?: effectiveXp
+                )
+                supabaseAuth.cacheProfileSnapshot(current.username, resolvedKey)
+                refreshCommunityData()
+                _userMessage.value = if (chosenFrame != null) {
+                    "Equipped ${chosenFrame.displayName} frame!"
+                } else {
+                    "Avatar frame removed."
+                }
+            }.onFailure { err ->
+                _userMessage.value = ErrorSanitizer.sanitize(err, "Unable to update avatar frame.")
+            }
+            _isProfileSaving.value = false
+        }
+    }
+
     fun updatePrivacySettings(updated: PrivacySettings) {
         val session = _authSession.value ?: return
         viewModelScope.launch {

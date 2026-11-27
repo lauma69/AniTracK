@@ -712,7 +712,7 @@ class SupabaseDiscussionService {
         try {
             val encodedId = URLEncoder.encode(userId, "UTF-8")
             val req = Request.Builder()
-                .url("${AppConfig.supabaseUrl}/rest/v1/profiles?id=eq.$encodedId&select=id,username,avatar_key,avatar_url&limit=1")
+                .url("${AppConfig.supabaseUrl}/rest/v1/profiles?id=eq.$encodedId&select=*&limit=1")
                 .addHeader("apikey", AppConfig.supabaseAnonKey)
                 .addHeader("Authorization", "Bearer ${session.accessToken}")
                 .get()
@@ -723,11 +723,18 @@ class SupabaseDiscussionService {
                 val arr = JSONArray(body)
                 if (arr.length() == 0) return@withContext null
                 val u = arr.getJSONObject(0)
+                val rawAvatarKey = u.optString("avatar_key").takeIf { it.isNotBlank() && it != "null" }
+                val rawAvatarFrame = u.optString("avatar_frame").takeIf { it.isNotBlank() && it != "null" }
+                val rawAvatarUrl = u.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
                 MentionableUser(
                     id = u.optString("id", userId),
                     username = u.optString("username", "Member").ifBlank { "Member" },
-                    avatarKey = u.optString("avatar_key", "avatar_1").ifBlank { "avatar_1" },
-                    avatarUrl = u.optString("avatar_url").takeIf { it.isNotBlank() && it != "null" }
+                    avatarKey = com.example.model.BuiltInAvatarFrame.resolveCompositeAvatarKey(
+                        rawAvatarKey = rawAvatarKey,
+                        rawAvatarFrame = rawAvatarFrame,
+                        rawAvatarUrl = rawAvatarUrl
+                    ),
+                    avatarUrl = rawAvatarUrl
                 )
             }
         } catch (_: Exception) {
