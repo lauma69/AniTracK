@@ -941,12 +941,14 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         val body = top?.latestPreview?.trim()?.takeIf { it.isNotEmpty() }
                             ?: "Open Anime Universe to view your new notification."
-                        ScheduleUpdateWorker.sendCommunityNotification(
-                            context = getApplication(),
-                            notificationId = newlyDetectedIds.first(),
-                            title = title,
-                            message = body
-                        )
+                        newlyDetectedIds.take(5).forEach { notifId ->
+                            ScheduleUpdateWorker.sendCommunityNotification(
+                                context = getApplication(),
+                                notificationId = notifId,
+                                title = title,
+                                message = body
+                            )
+                        }
                     }
                 }
             } else {

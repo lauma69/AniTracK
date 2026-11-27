@@ -1318,7 +1318,10 @@ fun AnimeDetailScreen(
                                         review = rev,
                                         onClick = { onSelectAnime(rev.animeId) },
                                         showAnimeHeader = false,
-                                        onToggleLike = { viewModel.toggleReviewLike(rev) }
+                                        onToggleLike = { viewModel.toggleReviewLike(rev) },
+                                        onEdit = if (profile != null && rev.userId == profile?.id) {
+                                            { showTrackingEditor = true }
+                                        } else null
                                     )
                                 }
                             }

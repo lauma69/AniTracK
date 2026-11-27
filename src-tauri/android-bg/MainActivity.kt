@@ -15,17 +15,22 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : TauriActivity() {
     companion object {
         private const val REQ_CODE_POST_NOTIFICATIONS = 7001
         private const val PREFS_NAME = "anime_universe_notif_bridge"
-        private const val KEY_HAS_REQUESTED_ONCE = "has_requested_post_notifications_once"
+        private const val KEY_HAS_USER_RESPONDED_ONCE = "has_user_responded_post_notifications_v2"
+        private val NEXT_NOTIF_ID = AtomicInteger(10000)
     }
 
     private var activeWebView: WebView? = null
+    private var autoPromptDispatchedThisLaunch: Boolean = false
+    private var lastReportedPermissionStatus: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,14 +55,70 @@ class MainActivity : TauriActivity() {
             runCatching { AnimeNotifScheduler.schedulePeriodic(applicationContext) }
             runCatching { refreshFcmPushTokenIfAvailable() }
         }
+
+        // Proactively ask for real Android 13+ POST_NOTIFICATIONS runtime permission on launch
+        // once the Activity window is attached, so the OS dialog always appears on fresh installs.
+        runCatching {
+            window?.decorView?.postDelayed({
+                requestNotificationPermissionIfNeededOnLaunch()
+            }, 900L)
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeededOnLaunch() {
+        if (autoPromptDispatchedThisLaunch) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        runCatching {
+            val runtimeGranted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (runtimeGranted) return
+
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val respondedBefore = prefs.getBoolean(KEY_HAS_USER_RESPONDED_ONCE, false)
+            val showRationale = runCatching {
+                ActivityCompat.shouldShowRequestPermissionRationale(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                )
+            }.getOrDefault(false)
+
+            // Ask immediately on first launch (or when Android still allows showing rationale).
+            if (!respondedBefore || showRationale) {
+                autoPromptDispatchedThisLaunch = true
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQ_CODE_POST_NOTIFICATIONS
+                )
+            }
+        }
     }
 
     override fun onResume() {
         super.onResume()
         // Immediately notify WebView if user just enabled/disabled notifications in Android Settings
         runCatching {
+            AnimeNotifScheduler.ensureChannels(applicationContext)
             val status = resolveCurrentOsPermissionStatus()
+            val becameGranted = status == "granted" && lastReportedPermissionStatus != "granted"
+            lastReportedPermissionStatus = status
             notifyWebViewPermissionChanged(status)
+            if (becameGranted) {
+                AnimeNotifScheduler.schedulePeriodic(applicationContext)
+                AnimeNotifScheduler.triggerImmediateCheck(applicationContext)
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Ensure background polling worker is armed when app moves to background
+        runCatching {
+            if (resolveCurrentOsPermissionStatus() == "granted") {
+                AnimeNotifScheduler.schedulePeriodic(applicationContext)
+            }
         }
     }
 
@@ -78,9 +139,21 @@ class MainActivity : TauriActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_CODE_POST_NOTIFICATIONS) {
             runCatching {
+                // Only mark responded AFTER Android actually returned a result from the dialog
+                if (permissions.isNotEmpty() || grantResults.isNotEmpty()) {
+                    getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean(KEY_HAS_USER_RESPONDED_ONCE, true)
+                        .apply()
+                }
                 val status = resolveCurrentOsPermissionStatus()
+                lastReportedPermissionStatus = status
                 notifyWebViewPermissionResult(status)
                 notifyWebViewPermissionChanged(status)
+                if (status == "granted") {
+                    AnimeNotifScheduler.schedulePeriodic(applicationContext)
+                    AnimeNotifScheduler.triggerImmediateCheck(applicationContext)
+                }
             }
         }
     }
@@ -101,20 +174,19 @@ class MainActivity : TauriActivity() {
                 if (runtimeGranted && areEnabledInManager) {
                     return@runCatching "granted"
                 }
-                // If runtime permission is granted but user disabled the master toggle in Android Settings
                 if (runtimeGranted && !areEnabledInManager) {
                     return@runCatching "denied"
                 }
 
                 val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                val requestedBefore = prefs.getBoolean(KEY_HAS_REQUESTED_ONCE, false)
+                val respondedBefore = prefs.getBoolean(KEY_HAS_USER_RESPONDED_ONCE, false)
                 val showRationale = runCatching {
                     ActivityCompat.shouldShowRequestPermissionRationale(
                         this,
                         Manifest.permission.POST_NOTIFICATIONS
                     )
                 }.getOrDefault(false)
-                if (!requestedBefore || showRationale) "prompt" else "denied"
+                if (!respondedBefore || showRationale) "prompt" else "denied"
             } else {
                 if (areEnabledInManager) "granted" else "denied"
             }
@@ -134,11 +206,12 @@ class MainActivity : TauriActivity() {
                     if (runtimeGranted) {
                         val status = resolveCurrentOsPermissionStatus()
                         notifyWebViewPermissionResult(status)
+                        notifyWebViewPermissionChanged(status)
                         return@runCatching
                     }
 
                     val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    val requestedBefore = prefs.getBoolean(KEY_HAS_REQUESTED_ONCE, false)
+                    val respondedBefore = prefs.getBoolean(KEY_HAS_USER_RESPONDED_ONCE, false)
                     val showRationale = runCatching {
                         ActivityCompat.shouldShowRequestPermissionRationale(
                             this,
@@ -146,15 +219,12 @@ class MainActivity : TauriActivity() {
                         )
                     }.getOrDefault(false)
 
-                    // If Android permanently denied POST_NOTIFICATIONS, calling requestPermissions
-                    // silently returns DENIED without showing any dialog. Return "denied" immediately
-                    // so the app displays the 1-tap "Open System Settings" guide.
-                    if (requestedBefore && !showRationale) {
+                    // Only skip the runtime dialog if Android previously returned a real denial
+                    // and now refuses to show the rationale dialog again.
+                    if (respondedBefore && !showRationale) {
                         notifyWebViewPermissionResult("denied")
                         return@runCatching
                     }
-
-                    prefs.edit().putBoolean(KEY_HAS_REQUESTED_ONCE, true).apply()
 
                     ActivityCompat.requestPermissions(
                         this,
@@ -164,6 +234,7 @@ class MainActivity : TauriActivity() {
                 } else {
                     val status = resolveCurrentOsPermissionStatus()
                     notifyWebViewPermissionResult(status)
+                    notifyWebViewPermissionChanged(status)
                 }
             }.onFailure {
                 notifyWebViewPermissionResult("denied")
@@ -205,15 +276,15 @@ class MainActivity : TauriActivity() {
         }
         return runCatching {
             AnimeNotifScheduler.ensureChannels(applicationContext)
+            val notifIdInt = NEXT_NOTIF_ID.incrementAndGet()
             val launchIntent = (applicationContext.packageManager.getLaunchIntentForPackage(packageName)
                 ?: Intent(applicationContext, MainActivity::class.java)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                putExtra("notification_id", "local_${System.currentTimeMillis()}")
+                putExtra("notification_id", "local_${notifIdInt}_${System.currentTimeMillis()}")
                 putExtra("target_screen", "notifications")
                 putExtra("type", type)
             }
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            val notifIdInt = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
             val pendingIntent = PendingIntent.getActivity(
                 applicationContext,
                 notifIdInt,
@@ -231,12 +302,93 @@ class MainActivity : TauriActivity() {
                 .setContentText(cleanBody)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(cleanBody))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setOnlyAlertOnce(false)
+                .setWhen(System.currentTimeMillis())
+                .setShowWhen(true)
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
                 .build()
 
             NotificationManagerCompat.from(applicationContext).notify(notifIdInt, notification)
+            true
+        }.getOrDefault(false)
+    }
+
+    fun writeAuthSessionToFilesDir(
+        supabaseUrl: String,
+        anonKey: String,
+        accessToken: String,
+        refreshToken: String,
+        userId: String
+    ): Boolean {
+        return runCatching {
+            val payload = JSONObject().apply {
+                put("supabase_url", supabaseUrl.trimEnd('/'))
+                put("anon_key", anonKey)
+                put("access_token", accessToken)
+                put("refresh_token", refreshToken)
+                put("user_id", userId)
+            }
+            File(applicationContext.filesDir, "notif_session.json").writeText(payload.toString())
+            if (resolveCurrentOsPermissionStatus() == "granted") {
+                AnimeNotifScheduler.schedulePeriodic(applicationContext)
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    fun clearAuthSessionInFilesDir(): Boolean {
+        return runCatching {
+            val file = File(applicationContext.filesDir, "notif_session.json")
+            if (file.exists()) file.delete()
+            true
+        }.getOrDefault(false)
+    }
+
+    fun writeLocalPrefsToFilesDir(
+        masterEnabled: Boolean,
+        messagesEnabled: Boolean,
+        updatesEnabled: Boolean,
+        remindersEnabled: Boolean,
+        osPermissionStatus: String
+    ): Boolean {
+        return runCatching {
+            val payload = JSONObject().apply {
+                put("master_enabled", masterEnabled)
+                put("messages_enabled", messagesEnabled)
+                put("updates_enabled", updatesEnabled)
+                put("reminders_enabled", remindersEnabled)
+                put("os_permission_status", osPermissionStatus)
+            }
+            File(applicationContext.filesDir, "notif_prefs.json").writeText(payload.toString())
+            true
+        }.getOrDefault(false)
+    }
+
+    fun mergeSeenIdsInFilesDir(idsJson: String): Boolean {
+        return runCatching {
+            val incoming = JSONArray(idsJson)
+            if (incoming.length() == 0) return true
+            val seenFile = File(applicationContext.filesDir, "seen_notifs.json")
+            val seen = LinkedHashSet<String>()
+            if (seenFile.exists()) {
+                runCatching {
+                    val existing = JSONArray(seenFile.readText())
+                    for (i in 0 until existing.length()) {
+                        val s = existing.optString(i).trim()
+                        if (s.isNotEmpty()) seen.add(s)
+                    }
+                }
+            }
+            for (i in 0 until incoming.length()) {
+                val s = incoming.optString(i).trim()
+                if (s.isNotEmpty()) seen.add(s)
+            }
+            val out = JSONArray()
+            seen.toList().takeLast(400).forEach { out.put(it) }
+            seenFile.writeText(out.toString())
             true
         }.getOrDefault(false)
     }
@@ -345,5 +497,43 @@ class AnimeAndroidNotifBridge(private val activity: MainActivity) {
     @JavascriptInterface
     fun sendLocalNotificationWithType(title: String, body: String, type: String): Boolean {
         return activity.postDirectLocalNotification(title, body, type)
+    }
+
+    @JavascriptInterface
+    fun syncAuthSession(
+        supabaseUrl: String,
+        anonKey: String,
+        accessToken: String,
+        refreshToken: String,
+        userId: String
+    ): Boolean {
+        return activity.writeAuthSessionToFilesDir(supabaseUrl, anonKey, accessToken, refreshToken, userId)
+    }
+
+    @JavascriptInterface
+    fun clearAuthSession(): Boolean {
+        return activity.clearAuthSessionInFilesDir()
+    }
+
+    @JavascriptInterface
+    fun syncLocalPrefs(
+        masterEnabled: Boolean,
+        messagesEnabled: Boolean,
+        updatesEnabled: Boolean,
+        remindersEnabled: Boolean,
+        osPermissionStatus: String
+    ): Boolean {
+        return activity.writeLocalPrefsToFilesDir(
+            masterEnabled,
+            messagesEnabled,
+            updatesEnabled,
+            remindersEnabled,
+            osPermissionStatus
+        )
+    }
+
+    @JavascriptInterface
+    fun markSeenIds(idsJson: String): Boolean {
+        return activity.mergeSeenIdsInFilesDir(idsJson)
     }
 }

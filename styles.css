@@ -1651,11 +1651,6 @@ svg {
   pointer-events: none;
 }
 
-@keyframes goldTrackSheen {
-  0% { background-position: 0% 50%; }
-  100% { background-position: 200% 50%; }
-}
-
 .smooth-rating-slider-wrap {
   display: flex;
   flex-direction: column;
@@ -1709,10 +1704,8 @@ svg {
   height: 100%;
   width: var(--slider-pct, 0%);
   border-radius: 999px;
-  background: linear-gradient(90deg, #9d7534 0%, #d8b778 42%, #fbe5b5 68%, #d8b778 100%);
-  background-size: 200% 100%;
-  animation: goldTrackSheen 4.5s linear infinite;
-  box-shadow: 0 0 14px rgba(216, 183, 120, 0.42), inset 0 1px 0 rgba(255, 249, 232, 0.45);
+  background: linear-gradient(90deg, #9d7534 0%, #d8b778 52%, #f0d79f 100%);
+  box-shadow: 0 0 12px rgba(216, 183, 120, 0.35), inset 0 1px 0 rgba(255, 249, 232, 0.38);
   pointer-events: none;
   will-change: width;
 }
@@ -3198,6 +3191,39 @@ svg {
 .community-note-reply-btn:hover {
   background: rgba(216, 183, 120, 0.26);
   border-color: var(--accent-primary);
+}
+
+.community-note-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(216, 183, 120, 0.42);
+  color: var(--accent-primary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.community-note-edit-btn:hover {
+  background: rgba(216, 183, 120, 0.22);
+  border-color: var(--accent-primary);
+  color: var(--highlight);
+}
+
+.community-review-edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(216, 183, 120, 0.28);
 }
 
 /* ==========================================================================

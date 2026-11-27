@@ -157,11 +157,16 @@ class ScheduleUpdateWorker(
                 val cleanBody = message.ifBlank { "Open Anime Universe to view your notification." }
 
                 val builder = NotificationCompat.Builder(context, COMMUNITY_CHANNEL_ID)
-                    .setSmallIcon(context.applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_dialog_info)
+                    .setSmallIcon(android.R.drawable.ic_popup_reminder)
                     .setContentTitle(cleanTitle)
                     .setContentText(cleanBody)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(cleanBody))
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                    .setDefaults(NotificationCompat.DEFAULT_ALL)
+                    .setOnlyAlertOnce(false)
+                    .setWhen(System.currentTimeMillis())
+                    .setShowWhen(true)
                     .setAutoCancel(true)
                     .setContentIntent(pendingIntent)
 

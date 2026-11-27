@@ -33,6 +33,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.GroupAdd
@@ -2081,9 +2082,12 @@ internal fun CommunityCommentsDialog(
 ) {
     val colors = AppTheme.colors
     val haptics = LocalHapticFeedback.current
+    val currentProfile by viewModel.userProfile.collectAsState()
+    val currentUserId = currentProfile?.id.orEmpty()
     val avgStars = StarRatingUtils.rating10ToStars(group.averageRating10)
     var selectedStars by remember(group.animeId) { mutableFloatStateOf(initialMyRatingStars) }
     var noteDraft by remember(group.animeId) { mutableStateOf(initialMyNote) }
+    var isEditingReview by remember(group.animeId) { mutableStateOf(false) }
     var activeTab by remember(group.animeId, openLiveChatInitially) {
         mutableStateOf(if (openLiveChatInitially || hasUnseenDiscussion) "discussion" else "notes")
     }
@@ -2390,10 +2394,45 @@ internal fun CommunityCommentsDialog(
                                                 }
                                             }
 
+                                            val isMyReview = currentUserId.isNotBlank() && rev.userId == currentUserId
                                             Row(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                                             ) {
+                                                if (isMyReview) {
+                                                    Surface(
+                                                        shape = CircleShape,
+                                                        color = colors.elevatedSurface.copy(alpha = 0.85f),
+                                                        border = BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.55f)),
+                                                        modifier = Modifier
+                                                            .clip(CircleShape)
+                                                            .clickable {
+                                                                selectedStars = revStars
+                                                                noteDraft = rev.reviewNotes
+                                                                isEditingReview = true
+                                                            }
+                                                            .testTag("community_note_edit_${rev.id}")
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Filled.Edit,
+                                                                contentDescription = "Edit my review",
+                                                                tint = colors.accentPrimary,
+                                                                modifier = Modifier.size(13.dp)
+                                                            )
+                                                            Text(
+                                                                text = "Edit",
+                                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                                                color = colors.accentPrimary
+                                                            )
+                                                        }
+                                                    }
+                                                }
+
                                                 Surface(
                                                     shape = CircleShape,
                                                     color = colors.accentPrimary.copy(alpha = 0.14f),
@@ -2510,6 +2549,25 @@ internal fun CommunityCommentsDialog(
                                     onDismissRequest = { openNoteMenuId = null },
                                     containerColor = colors.backgroundSecondary
                                 ) {
+                                    if (currentUserId.isNotBlank() && rev.userId == currentUserId) {
+                                        DropdownMenuItem(
+                                            text = { Text("Edit my review", color = colors.textPrimary) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Edit,
+                                                    contentDescription = null,
+                                                    tint = colors.accentPrimary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            },
+                                            onClick = {
+                                                openNoteMenuId = null
+                                                selectedStars = revStars
+                                                noteDraft = rev.reviewNotes
+                                                isEditingReview = true
+                                            }
+                                        )
+                                    }
                                     DropdownMenuItem(
                                         text = { Text("Reply to @${rev.username}", color = colors.textPrimary) },
                                         leadingIcon = {
@@ -2545,7 +2603,11 @@ internal fun CommunityCommentsDialog(
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
-                                        text = if (initialMyNote.isNotBlank() || initialMyRatingStars > 0f) "UPDATE RATING" else "YOUR RATING",
+                                        text = when {
+                                            isEditingReview -> "EDITING YOUR REVIEW"
+                                            initialMyNote.isNotBlank() || initialMyRatingStars > 0f -> "UPDATE RATING"
+                                            else -> "YOUR RATING"
+                                        },
                                         style = MicroUpperLabel.copy(fontSize = 9.sp, letterSpacing = 1.sp),
                                         color = colors.accentPrimary
                                     )
@@ -2666,14 +2728,15 @@ internal fun CommunityCommentsDialog(
 
                         AppPrimaryButton(
                             text = when {
-                                isSubmitting -> "Posting..."
-                                initialMyNote.isNotBlank() || initialMyRatingStars > 0f -> "Update Note in Community"
-                                else -> "Post Note to Community"
+                                isSubmitting -> "Saving..."
+                                isEditingReview -> "Save Edited Review"
+                                initialMyNote.isNotBlank() || initialMyRatingStars > 0f -> "Update Review in Community"
+                                else -> "Post Review to Community"
                             },
                             enabled = !isSubmitting && (noteDraft.trim().isNotEmpty() || selectedStars > 0f),
                             onClick = {
                                 onSubmitComment(selectedStars, noteDraft) {
-                                    noteDraft = ""
+                                    isEditingReview = false
                                 }
                             },
                             modifier = Modifier
@@ -2696,7 +2759,8 @@ internal fun EditorialCommunityNoteCard(
     review: CommunityReview,
     onClick: () -> Unit,
     showAnimeHeader: Boolean = true,
-    onToggleLike: (() -> Unit)? = null
+    onToggleLike: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null
 ) {
     val colors = AppTheme.colors
     val formattedDate = remember(review.updatedAt) { formatCommunityTimestamp(review.updatedAt) }
@@ -2828,31 +2892,66 @@ internal fun EditorialCommunityNoteCard(
                     }
                 }
 
-                Surface(
-                    shape = CircleShape,
-                    color = if (review.likedByMe) colors.accentPrimary.copy(alpha = 0.2f) else colors.elevatedSurface.copy(alpha = 0.65f),
-                    border = if (review.likedByMe) BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.6f)) else null,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .clickable(enabled = onToggleLike != null) { onToggleLike?.invoke() }
-                        .testTag("like_review_${review.id}")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    if (onEdit != null) {
+                        Surface(
+                            shape = CircleShape,
+                            color = colors.elevatedSurface.copy(alpha = 0.78f),
+                            border = BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable { onEdit() }
+                                .testTag("edit_review_${review.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Edit,
+                                    contentDescription = "Edit review",
+                                    tint = colors.accentPrimary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = "Edit",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = colors.accentPrimary
+                                )
+                            }
+                        }
+                    }
+
+                    Surface(
+                        shape = CircleShape,
+                        color = if (review.likedByMe) colors.accentPrimary.copy(alpha = 0.2f) else colors.elevatedSurface.copy(alpha = 0.65f),
+                        border = if (review.likedByMe) BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.6f)) else null,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable(enabled = onToggleLike != null) { onToggleLike?.invoke() }
+                            .testTag("like_review_${review.id}")
                     ) {
-                        Icon(
-                            imageVector = if (review.likedByMe) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                            contentDescription = if (review.likedByMe) "Unlike review" else "Like review",
-                            tint = if (review.likedByMe) colors.accentPrimary else colors.textSecondary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "${review.likesCount}",
-                            style = TabularNumSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
-                            color = if (review.likedByMe) colors.highlight else colors.textSecondary
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (review.likedByMe) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                                contentDescription = if (review.likedByMe) "Unlike review" else "Like review",
+                                tint = if (review.likedByMe) colors.accentPrimary else colors.textSecondary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "${review.likesCount}",
+                                style = TabularNumSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+                                color = if (review.likedByMe) colors.highlight else colors.textSecondary
+                            )
+                        }
                     }
                 }
             }

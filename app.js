@@ -217,6 +217,9 @@ let activeRatingSliderDragCount = 0;
 let deferredRenderAfterSliderDrag = false;
 let commQuickRateAutoSaveTimer = null;
 let detailRatingAutoSaveTimer = null;
+let detailExplicitSaveSeq = 0;
+let detailUserTouchedRating = false;
+let detailUserTouchedNote = false;
 
 function clearCommQuickRateAutoSave() {
   if (commQuickRateAutoSaveTimer) {
@@ -835,6 +838,10 @@ const state = {
   communityNoteSaving: false,
   communityNoteFeedback: '',
   communityNoteError: '',
+  editingCommunityReviewAnimeId: null,
+  editingCommunityReviewStars: 0,
+  editingCommunityReviewNote: '',
+  editingCommunityReviewSaving: false,
 
   // Detail Rating & Note Feedback
   detailRatingSaving: false,
@@ -4165,12 +4172,20 @@ async function openAnimeDetail(animeId) {
     state.previousTab = state.tab;
   }
   state.tab = 'detail';
-  const inVault = state.vault.find((v) => v.animeId === animeId);
-  const inDisc = state.discover.find((d) => d.animeId === animeId);
+  clearDetailRatingAutoSave();
+  detailUserTouchedRating = false;
+  detailUserTouchedNote = false;
+  const inVault = state.vault.find((v) => Number(v.animeId) === Number(animeId));
+  const inDisc = state.discover.find((d) => Number(d.animeId) === Number(animeId));
+  const myCommRev = state.session
+    ? state.communityReviews.find((r) => r.user_id === state.session.userId && Number(r.anime_id) === Number(animeId))
+    : null;
+  const initialRating10 = inVault?.rating10 ?? myCommRev?.rating ?? null;
+  const initialReviewNotes = inVault?.reviewNotes || myCommRev?.review_notes || '';
   state.detailAnime = inVault
-    ? { ...inVault, inWatchlist: true }
+    ? { ...inVault, rating10: initialRating10, reviewNotes: initialReviewNotes, inWatchlist: true }
     : inDisc
-    ? { ...inDisc, inWatchlist: false }
+    ? { ...inDisc, rating10: initialRating10, reviewNotes: initialReviewNotes, inWatchlist: false }
     : {
         animeId,
         title: 'Loading...',
@@ -4179,8 +4194,8 @@ async function openAnimeDetail(animeId) {
         season: 1,
         watchedEpisodes: 0,
         totalEpisodes: null,
-        rating10: null,
-        reviewNotes: '',
+        rating10: initialRating10,
+        reviewNotes: initialReviewNotes,
         inWatchlist: false
       };
   state.detailRich = null;
@@ -4189,7 +4204,7 @@ async function openAnimeDetail(animeId) {
   state.detailRatingSaving = false;
   state.detailRatingFeedback = '';
   state.detailRatingError = '';
-  state.detailNoteDraft = state.detailAnime.reviewNotes || '';
+  state.detailNoteDraft = initialReviewNotes;
   state.discussion = {
     ...state.discussion,
     animeId,
@@ -4337,14 +4352,18 @@ async function openAnimeDetail(animeId) {
         status: existing?.status || 'watching',
         season: existing?.season || 1,
         watchedEpisodes: existing?.watchedEpisodes || 0,
-        rating10: existing?.rating10 || null,
-        reviewNotes: existing?.reviewNotes || '',
+        rating10: detailUserTouchedRating
+          ? state.detailAnime?.rating10 ?? null
+          : (existing?.rating10 ?? state.detailAnime?.rating10 ?? null),
+        reviewNotes: detailUserTouchedNote
+          ? (state.detailNoteDraft ?? state.detailAnime?.reviewNotes ?? '')
+          : (existing?.reviewNotes || state.detailAnime?.reviewNotes || ''),
         isPinned: Boolean(existing?.isPinned),
         isFavorite: Boolean(existing?.isFavorite),
         inWatchlist: Boolean(existing)
       };
-      if (!state.detailNoteDraft && existing?.reviewNotes) {
-        state.detailNoteDraft = existing.reviewNotes;
+      if (!detailUserTouchedNote && !state.detailNoteDraft && state.detailAnime.reviewNotes) {
+        state.detailNoteDraft = state.detailAnime.reviewNotes;
       }
 
       // Render detail page immediately, then resolve the complete multi-season franchise chain via batched BFS
@@ -4592,36 +4611,49 @@ async function removeFromHomeOnly(animeId) {
   await syncRemoveFromHomeCloud(aid);
 }
 
-// Part 1: Post a Community note/rating WITHOUT ever adding the anime to Home
+// Part 1: Post or update a Community note/rating WITHOUT ever adding the anime to Home
 async function submitCommunityCommentNote(animeId, rating10Val, noteText, animeMeta = null, opts = {}) {
   const aid = Number(animeId);
-  const cleanNote = String(noteText || '').trim();
+  const cleanNote = String(noteText ?? '').trim();
   const cleanRating = clampRating10(rating10Val);
-  if (!cleanNote && !cleanRating) return { ok: false, error: 'Please select a rating or write a note first.' };
+  const replaceNote = Boolean(opts.replaceNote);
+  const silentRender = Boolean(opts.silentRender);
+  if (!cleanNote && !cleanRating) {
+    const errMsg = 'Please select a rating or write a note first.';
+    if (opts.throwOnError) throw new Error(errMsg);
+    return { ok: false, error: errMsg };
+  }
 
   const existingVault = state.vault.find((v) => Number(v.animeId) === aid);
   if (existingVault) {
+    const resolvedNotes = replaceNote ? cleanNote : (cleanNote || existingVault.reviewNotes || '');
     // Preserve existing Home membership strictly; NEVER add to Home just because user rated/noted
     await saveVaultEntry(
       {
         ...existingVault,
         rating10: cleanRating ?? existingVault.rating10,
-        reviewNotes: cleanNote || existingVault.reviewNotes || ''
+        reviewNotes: resolvedNotes
       },
       { addToHome: false, throwOnError: Boolean(opts.throwOnError) }
     );
     if (!opts.silentToast) showToast('Rating & note saved');
-    renderApp();
+    if (!silentRender) renderApp();
     return { ok: true };
   }
 
   // Anime is NOT in Home or Library: save purely to Community (community_notes) — NEVER adds to Home!
   const meta = animeMeta || state.detailAnime || state.discover.find((d) => Number(d.animeId) === aid) || { animeId: aid };
+  const existingCommRev = state.session
+    ? state.communityReviews.find((r) => r.user_id === state.session.userId && Number(r.anime_id) === aid)
+    : null;
+  const resolvedRating = cleanRating ?? (existingCommRev?.rating ?? null);
+  const resolvedNote = replaceNote ? cleanNote : (cleanNote || existingCommRev?.review_notes || '');
+
   if (state.detailAnime && Number(state.detailAnime.animeId) === aid) {
     state.detailAnime = {
       ...state.detailAnime,
-      rating10: cleanRating ?? state.detailAnime.rating10,
-      reviewNotes: cleanNote || state.detailAnime.reviewNotes || ''
+      rating10: resolvedRating ?? state.detailAnime.rating10,
+      reviewNotes: replaceNote ? cleanNote : (resolvedNote || state.detailAnime.reviewNotes || '')
     };
   }
 
@@ -4629,7 +4661,7 @@ async function submitCommunityCommentNote(animeId, rating10Val, noteText, animeM
   if (state.session) {
     const metaGenres = normalizeAnimeGenresWithAdult(meta.genres || [], Boolean(meta.isAdult || meta.is_adult));
     const newEntry = {
-      id: `local_note_${state.session.userId}_${aid}`,
+      id: existingCommRev?.id || `local_note_${state.session.userId}_${aid}`,
       source: 'community_notes',
       user_id: state.session.userId,
       username: state.profile.username || 'Member',
@@ -4639,17 +4671,17 @@ async function submitCommunityCommentNote(animeId, rating10Val, noteText, animeM
       anime_cover_image: meta.coverImage || meta.anime_cover_image || '',
       genres: metaGenres,
       is_adult: isHentaiOrAdultAnime(metaGenres, Boolean(meta.isAdult || meta.is_adult)),
-      rating: cleanRating,
-      review_notes: cleanNote,
+      rating: resolvedRating,
+      review_notes: resolvedNote,
       updated_at: new Date().toISOString(),
-      likes_count: 0,
-      liked_by_me: false
+      likes_count: existingCommRev?.likes_count || 0,
+      liked_by_me: Boolean(existingCommRev?.liked_by_me)
     };
     state.communityReviews = [
       newEntry,
       ...state.communityReviews.filter((r) => !(r.user_id === state.session.userId && Number(r.anime_id) === aid))
     ];
-    renderApp();
+    if (!silentRender) renderApp();
 
     try {
       await ensureCatalogAnimeSynced({
@@ -4661,14 +4693,14 @@ async function submitCommunityCommentNote(animeId, rating10Val, noteText, animeM
         genres: metaGenres,
         isAdult: isHentaiOrAdultAnime(metaGenres, Boolean(meta.isAdult || meta.is_adult))
       });
-      await syncCommunityNoteCloud(aid, cleanRating, cleanNote);
+      await syncCommunityNoteCloud(aid, resolvedRating, resolvedNote);
       await loadCommunityReviews();
     } catch (err) {
       if (opts.throwOnError) throw err;
     }
   }
   if (!opts.silentToast) showToast('Posted to Community (not added to Home)');
-  renderApp();
+  if (!silentRender) renderApp();
   return { ok: true };
 }
 
@@ -5902,12 +5934,17 @@ function openCommunityHubForAnime(animeId, options = {}) {
     fallbackTitle = '',
     fallbackCover = '',
     jumpTarget = null,
-    notificationId = null
+    notificationId = null,
+    startEditingReview = false
   } = options;
 
   const allGroups = groupCommunityReviewsByAnime(state.communityReviews);
   const grp = allGroups.find((g) => Number(g.anime_id) === aid);
   const vaultItem = state.vault.find((v) => Number(v.animeId) === aid);
+  const myCommRev = state.session
+    ? (grp?.reviews || []).find((r) => r.user_id === state.session.userId) ||
+      state.communityReviews.find((r) => r.user_id === state.session.userId && Number(r.anime_id) === aid)
+    : null;
   const unseenItem = (state.notifications.unseenAnime || []).find((u) => Number(u.anime_id) === aid);
 
   if (!grp) {
@@ -5927,15 +5964,23 @@ function openCommunityHubForAnime(animeId, options = {}) {
     state.communityCommentsAnimeFallback = null;
   }
 
+  const existingRating10 = myCommRev?.rating ?? vaultItem?.rating10 ?? null;
+  const existingNote = myCommRev?.review_notes || vaultItem?.reviewNotes || '';
+  const existingStars = existingRating10 ? rating10ToStars(existingRating10) || 0 : 0;
+
   state.communityCommentsAnimeId = aid;
-  state.communityCommentsTab = tab === 'notes' ? 'notes' : 'discussion';
+  state.communityCommentsTab = startEditingReview || tab === 'notes' ? 'notes' : 'discussion';
   state.pendingCommunityReplyUser = null;
   state.discussion.emojiTrayOpen = false;
-  state.communityCommentDraftStars = vaultItem && vaultItem.rating10 ? rating10ToStars(vaultItem.rating10) || 0 : 0;
-  state.communityCommentDraftNote = vaultItem ? vaultItem.reviewNotes || '' : '';
+  state.communityCommentDraftStars = existingStars;
+  state.communityCommentDraftNote = existingNote;
   state.communityNoteSaving = false;
   state.communityNoteFeedback = '';
   state.communityNoteError = '';
+  state.editingCommunityReviewAnimeId = startEditingReview && myCommRev ? aid : null;
+  state.editingCommunityReviewStars = existingStars;
+  state.editingCommunityReviewNote = existingNote;
+  state.editingCommunityReviewSaving = false;
 
   if (jumpTarget) {
     state.pendingNotificationJump = {
@@ -6413,20 +6458,21 @@ async function patchUserNotificationsRead(queryFilter, readAtIso) {
 async function fetchAuthoritativeUnreadSnapshot() {
   const uid = state.session?.userId;
   if (!uid) {
-    return { unreadIds: new Set(), unreadCount: 0, unreadCountByAnime: new Map() };
+    return { unreadIds: new Set(), unreadCount: 0, unreadCountByAnime: new Map(), rowsById: new Map() };
   }
   const [legacyRows, modernRows] = await Promise.all([
     supabaseRequest(
-      `/rest/v1/user_notifications?select=id,anime_id&recipient_user_id=eq.${encodeURIComponent(uid)}&is_read=eq.false&limit=1000`,
+      `/rest/v1/user_notifications?select=id,anime_id,notification_type,preview_text&recipient_user_id=eq.${encodeURIComponent(uid)}&is_read=eq.false&order=created_at.desc&limit=1000`,
       'GET'
     ).catch(() => []),
     supabaseRequest(
-      `/rest/v1/notifications?select=id,legacy_notification_id,metadata&user_id=eq.${encodeURIComponent(uid)}&is_read=eq.false&limit=1000`,
+      `/rest/v1/notifications?select=id,legacy_notification_id,title,message,type,metadata&user_id=eq.${encodeURIComponent(uid)}&is_read=eq.false&order=created_at.desc&limit=1000`,
       'GET'
     ).catch(() => [])
   ]);
   const unreadIds = new Set();
   const unreadCountByAnime = new Map();
+  const rowsById = new Map();
   const seenLegacyIds = new Set();
   if (Array.isArray(legacyRows)) {
     legacyRows.forEach((row) => {
@@ -6434,6 +6480,17 @@ async function fetchAuthoritativeUnreadSnapshot() {
       if (!id) return;
       unreadIds.add(id);
       seenLegacyIds.add(id);
+      rowsById.set(id, {
+        id,
+        type: row?.notification_type || 'message',
+        title: row?.notification_type === 'reply'
+          ? 'Anime Universe • New Reply'
+          : row?.notification_type === 'mention'
+          ? 'Anime Universe • Tagged You'
+          : 'Anime Universe • Community Alert',
+        body: row?.preview_text || '',
+        animeId: row?.anime_id ? Number(row.anime_id) : null
+      });
       const aid = Number(row?.anime_id || 0);
       if (aid > 0) {
         unreadCountByAnime.set(aid, (unreadCountByAnime.get(aid) || 0) + 1);
@@ -6447,13 +6504,22 @@ async function fetchAuthoritativeUnreadSnapshot() {
       const id = String(row?.id || '').trim();
       if (!id) return;
       unreadIds.add(id);
+      rowsById.set(id, {
+        id,
+        type: row?.type || 'message',
+        title: row?.title || 'Anime Universe • Notification',
+        body: row?.message || '',
+        animeId: row?.metadata?.anime_id ? Number(row.metadata.anime_id) : null,
+        senderName: row?.metadata?.sender_name || '',
+        senderAvatar: row?.metadata?.sender_avatar || 'avatar_1'
+      });
       const aid = Number(row?.metadata?.anime_id || 0);
       if (aid > 0) {
         unreadCountByAnime.set(aid, (unreadCountByAnime.get(aid) || 0) + 1);
       }
     });
   }
-  return { unreadIds, unreadCount: unreadIds.size, unreadCountByAnime };
+  return { unreadIds, unreadCount: unreadIds.size, unreadCountByAnime, rowsById };
 }
 
 async function refreshUnreadNotificationCount() {
@@ -6486,11 +6552,16 @@ async function refreshUnreadNotificationCount() {
         NativeNotificationBridge.knownUnreadIds.add(nid);
       });
       NativeNotificationBridge.hasPrimedUnread = true;
-      if (snap.unreadIds.size > 0) {
+      if (isInitialSync && snap.unreadIds.size > 0) {
         NativeNotificationBridge.markSeenInNative(Array.from(snap.unreadIds));
       }
       if (newlyDetectedIds.length > 0) {
-        NativeNotificationBridge.alertNewlyDetectedUnread(newlyDetectedIds[0], summary);
+        // Deliver ALL newly detected unread notifications (up to 5 per batch), not just the first one
+        const batch = newlyDetectedIds.slice(0, 5).reverse();
+        for (const nid of batch) {
+          const rowMeta = snap.rowsById ? snap.rowsById.get(nid) : null;
+          NativeNotificationBridge.alertNewlyDetectedUnread(nid, summary, rowMeta);
+        }
       }
     }
     if (state.notifications.items.length > 0) {
@@ -7012,7 +7083,7 @@ function renderInlineEpisodeStepper(effective, scope = 'card') {
             title="Save episode (Enter)"
             ${editObj.saving ? 'disabled' : ''}
           >
-            ${editObj.saving ? '<span class="inline-ep-spinner"></span>' : '✓'}
+            ✓
           </button>
           <button
             type="button"
@@ -7936,16 +8007,28 @@ function renderCommunityScreen() {
                                 const myVault = state.vault.find((v) => Number(v.animeId) === Number(grp.anime_id));
                                 const myStars = rating10ToStars(myRev?.rating ?? myVault?.rating10) || 0;
                                 const isQrOpen = state.communityQuickRate && Number(state.communityQuickRate.animeId) === Number(grp.anime_id);
-                                return `<button
-                                  type="button"
-                                  class="community-quick-rate-btn ${isQrOpen ? 'active' : ''}"
-                                  data-comm-quick-rate="${grp.anime_id}"
-                                  data-comm-my-stars="${myStars}"
-                                  title="Rate ${escapeHtml(grp.anime_title)} directly with 0.1 precision"
-                                >
-                                  <span>★</span>
-                                  <span class="tabular-num">${myStars > 0 ? myStars.toFixed(1) : 'Rate'}</span>
-                                </button>`;
+                                return `
+                                  ${
+                                    myRev
+                                      ? `<button
+                                          type="button"
+                                          class="community-note-edit-btn"
+                                          data-open-edit-review="${grp.anime_id}"
+                                          title="Edit your review for ${escapeHtml(grp.anime_title)}"
+                                        >✎ Edit</button>`
+                                      : ''
+                                  }
+                                  <button
+                                    type="button"
+                                    class="community-quick-rate-btn ${isQrOpen ? 'active' : ''}"
+                                    data-comm-quick-rate="${grp.anime_id}"
+                                    data-comm-my-stars="${myStars}"
+                                    title="Rate ${escapeHtml(grp.anime_title)} directly with 0.1 precision"
+                                  >
+                                    <span>★</span>
+                                    <span class="tabular-num">${myStars > 0 ? myStars.toFixed(1) : 'Rate'}</span>
+                                  </button>
+                                `;
                               })()
                             : ''
                         }
@@ -10073,6 +10156,11 @@ function renderModals() {
                                 const rStars = rev.rating ? rating10ToStars(rev.rating) || 0 : 0;
                                 const rSent = rev.rating ? sentimentFromRating10(rev.rating) : null;
                                 const hasNote = String(rev.review_notes || '').trim().length > 0;
+                                const isMyRev = Boolean(state.session && rev.user_id === state.session.userId);
+                                const isEditingMyRev = Boolean(
+                                  isMyRev && Number(state.editingCommunityReviewAnimeId) === Number(grp.anime_id)
+                                );
+                                const editStars = Number(state.editingCommunityReviewStars || 0);
                                 return `
                                   <div
                                     class="community-comment-item"
@@ -10089,9 +10177,19 @@ function renderModals() {
                                           <div style="font-size:11.5px;color:var(--text-muted);">${escapeHtml(formatReviewDate(rev.updated_at))}</div>
                                         </div>
                                       </div>
-                                      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+                                      <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
                                         ${
-                                          state.session
+                                          isMyRev && !isEditingMyRev
+                                            ? `<button
+                                                 type="button"
+                                                 class="community-note-edit-btn"
+                                                 data-comm-note-edit="1"
+                                                 data-comm-note-edit-stars="${rStars}"
+                                               >✎ Edit</button>`
+                                            : ''
+                                        }
+                                        ${
+                                          state.session && !isEditingMyRev
                                             ? `<button
                                                  type="button"
                                                  class="community-note-reply-btn"
@@ -10102,20 +10200,63 @@ function renderModals() {
                                             : ''
                                         }
                                         ${
-                                          rStars > 0
-                                            ? `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;">
-                                                <div style="display:inline-flex;align-items:center;gap:4px;">
-                                                  <span style="display:inline-flex;gap:1px;">${renderFiveStarsHtml(rStars)}</span>
-                                                  <span class="tabular-num" style="font-size:13.5px;font-weight:700;color:var(--highlight);">${rStars.toFixed(1)}</span>
-                                                </div>
-                                                ${rSent ? `<span class="sentiment-pill soft ${rSent.key}" style="font-size:9px;padding:2px 7px;">${rSent.shortLabel.toUpperCase()}</span>` : ''}
-                                              </div>`
-                                            : `<span class="sentiment-pill soft cinema" style="font-size:9px;padding:2px 8px;">NOTE</span>`
+                                          !isEditingMyRev
+                                            ? rStars > 0
+                                              ? `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;">
+                                                  <div style="display:inline-flex;align-items:center;gap:4px;">
+                                                    <span style="display:inline-flex;gap:1px;">${renderFiveStarsHtml(rStars)}</span>
+                                                    <span class="tabular-num" style="font-size:13.5px;font-weight:700;color:var(--highlight);">${rStars.toFixed(1)}</span>
+                                                  </div>
+                                                  ${rSent ? `<span class="sentiment-pill soft ${rSent.key}" style="font-size:9px;padding:2px 7px;">${rSent.shortLabel.toUpperCase()}</span>` : ''}
+                                                </div>`
+                                              : `<span class="sentiment-pill soft cinema" style="font-size:9px;padding:2px 8px;">NOTE</span>`
+                                            : ''
                                         }
                                       </div>
                                     </div>
                                     ${
-                                      hasNote
+                                      isEditingMyRev
+                                        ? `
+                                          <div class="community-review-edit-box">
+                                            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                                              <div style="display:flex;align-items:center;gap:8px;">
+                                                <span class="micro-label" style="color:var(--accent-primary);">EDIT YOUR REVIEW</span>
+                                                <span id="comm-edit-rev-star-label" class="tabular-num" style="font-size:13px;font-weight:800;color:var(--highlight);">${
+                                                  editStars > 0 ? `${editStars.toFixed(1)} ★` : 'Unrated'
+                                                }</span>
+                                              </div>
+                                              <div style="display:inline-flex;align-items:center;gap:5px;">
+                                                <button type="button" class="capsule-pill" id="btn-comm-edit-rev-minus" style="height:26px;padding:0 9px;font-size:11px;">−0.1 ★</button>
+                                                <button type="button" class="capsule-pill" id="btn-comm-edit-rev-plus" style="height:26px;padding:0 9px;font-size:11px;">+0.1 ★</button>
+                                              </div>
+                                            </div>
+                                            <div style="padding:2px 0;">
+                                              ${renderSmoothRatingSliderHtml({
+                                                id: 'comm-edit-rev-slider',
+                                                value: editStars > 0 ? editStars : 4.0,
+                                                large: false,
+                                                showScale: true,
+                                                ariaLabel: 'Edit review star rating slider'
+                                              })}
+                                            </div>
+                                            <textarea
+                                              id="inp-comm-edit-rev-note"
+                                              class="auth-input"
+                                              style="height:82px;padding:10px;resize:vertical;width:100%;"
+                                              placeholder="Edit your review note..."
+                                              ${state.editingCommunityReviewSaving ? 'disabled' : ''}
+                                            >${escapeHtml(state.editingCommunityReviewNote || '')}</textarea>
+                                            <div style="display:flex;justify-content:flex-end;gap:8px;">
+                                              <button type="button" class="btn-secondary" id="btn-comm-edit-rev-cancel" style="height:34px;padding:0 13px;font-size:12px;" ${
+                                                state.editingCommunityReviewSaving ? 'disabled' : ''
+                                              }>Cancel</button>
+                                              <button type="button" class="btn-primary" id="btn-comm-edit-rev-save" style="height:34px;padding:0 16px;font-size:12px;" ${
+                                                state.editingCommunityReviewSaving ? 'disabled' : ''
+                                              }>${state.editingCommunityReviewSaving ? 'SAVING...' : 'SAVE REVIEW'}</button>
+                                            </div>
+                                          </div>
+                                        `
+                                        : hasNote
                                         ? `<div class="review-quote-box" style="padding:11px 14px;">
                                             <div class="review-quote-bar"></div>
                                             <div class="review-quote-text" style="font-size:13.5px;">“${escapeHtml(rev.review_notes)}”</div>
@@ -10130,11 +10271,16 @@ function renderModals() {
                     </div>
 
                     ${
-                      state.session
-                        ? `<div class="hub-reviews-composer">
+                      state.session && Number(state.editingCommunityReviewAnimeId) !== Number(grp.anime_id)
+                        ? (() => {
+                            const myExistingRev = grp.reviews.find((r) => r.user_id === state.session.userId);
+                            const hasMyRev = Boolean(myExistingRev);
+                            return `<div class="hub-reviews-composer">
                             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:nowrap;min-height:28px;">
                               <div style="display:flex;align-items:center;gap:8px;min-width:0;">
-                                <span class="micro-label" style="color:var(--accent-primary);white-space:nowrap;">YOUR RATING &amp; REVIEW</span>
+                                <span class="micro-label" style="color:var(--accent-primary);white-space:nowrap;">${
+                                  hasMyRev ? 'UPDATE YOUR RATING &amp; REVIEW' : 'YOUR RATING &amp; REVIEW'
+                                }</span>
                                 <span id="comm-modal-star-label" class="tabular-num" style="font-size:13.5px;font-weight:800;color:var(--highlight);min-width:44px;white-space:nowrap;">${
                                   draftStars > 0 ? `${draftStars.toFixed(1)} ★` : ''
                                 }</span>
@@ -10158,13 +10304,13 @@ function renderModals() {
                                 id="inp-comm-modal-note"
                                 class="auth-input"
                                 style="height:42px;flex:1;"
-                                placeholder="Write your review for this anime..."
+                                placeholder="${hasMyRev ? 'Edit your review for this anime...' : 'Write your review for this anime...'}"
                                 value="${escapeHtml(state.communityCommentDraftNote || '')}"
                                 ${state.communityNoteSaving ? 'disabled' : ''}
                               />
                               <button type="button" class="btn-primary" id="btn-comm-modal-submit" style="height:42px;padding:0 16px;" ${
                                 state.communityNoteSaving ? 'disabled' : ''
-                              }>${state.communityNoteSaving ? 'POSTING...' : 'POST'}</button>
+                              }>${state.communityNoteSaving ? 'SAVING...' : hasMyRev ? 'UPDATE' : 'POST'}</button>
                             </div>
                             ${
                               state.communityNoteFeedback
@@ -10176,7 +10322,8 @@ function renderModals() {
                                 ? `<div class="feedback-banner error" style="margin-top:4px;">! ${escapeHtml(state.communityNoteError)}</div>`
                                 : ''
                             }
-                          </div>`
+                          </div>`;
+                          })()
                         : ''
                     }
                   `
@@ -11003,7 +11150,7 @@ function bindAppEvents() {
 
   document.querySelectorAll('[data-open-detail]').forEach((el) => {
     el.onclick = (e) => {
-      if (e.target.closest('[data-open-comments]')) return;
+      if (e.target.closest('[data-open-comments]') || e.target.closest('[data-open-edit-review]')) return;
       e.stopPropagation();
       if (state._suppressNextCardClick) {
         state._suppressNextCardClick = false;
@@ -11750,6 +11897,13 @@ function bindAppEvents() {
       openCommunityHubForAnime(aid, { tab: 'discussion' });
     };
   });
+  document.querySelectorAll('[data-open-edit-review]').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      const aid = Number(el.getAttribute('data-open-edit-review'));
+      openCommunityHubForAnime(aid, { tab: 'notes', startEditingReview: true });
+    };
+  });
 
   document.querySelectorAll('[data-comm-modal-tab]').forEach((btn) => {
     btn.onclick = (e) => {
@@ -12095,6 +12249,131 @@ function bindAppEvents() {
       }
     };
   }
+  document.querySelectorAll('[data-comm-note-edit]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const aid = Number(state.communityCommentsAnimeId);
+      if (!aid || !state.session) return;
+      const allGroups = groupCommunityReviewsByAnime(state.communityReviews);
+      const grp = allGroups.find((g) => Number(g.anime_id) === aid);
+      const myRev = (grp?.reviews || []).find((r) => r.user_id === state.session.userId);
+      const myVault = state.vault.find((v) => Number(v.animeId) === aid);
+      const existingRating10 = myRev?.rating ?? myVault?.rating10 ?? null;
+      const existingStars = existingRating10 ? rating10ToStars(existingRating10) || 0 : 0;
+      const existingNote = myRev?.review_notes || myVault?.reviewNotes || '';
+      state.editingCommunityReviewAnimeId = aid;
+      state.editingCommunityReviewStars = existingStars;
+      state.editingCommunityReviewNote = existingNote;
+      state.editingCommunityReviewSaving = false;
+      state.communityNoteFeedback = '';
+      state.communityNoteError = '';
+      renderApp();
+      setTimeout(() => {
+        const ta = document.getElementById('inp-comm-edit-rev-note');
+        if (ta) {
+          ta.focus();
+          try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (_) {}
+        }
+      }, 30);
+    };
+  });
+
+  const commEditRevSlider = document.getElementById('comm-edit-rev-slider');
+  const updateCommEditRevStarsInPlace = (nextStars) => {
+    const ta = document.getElementById('inp-comm-edit-rev-note');
+    if (ta) state.editingCommunityReviewNote = ta.value;
+    state.editingCommunityReviewStars = nextStars;
+    const lbl = document.getElementById('comm-edit-rev-star-label');
+    if (lbl) lbl.textContent = `${nextStars.toFixed(1)} ★`;
+  };
+  const btnCommEditRevMinus = document.getElementById('btn-comm-edit-rev-minus');
+  if (btnCommEditRevMinus) {
+    btnCommEditRevMinus.onclick = (e) => {
+      e.stopPropagation();
+      const cur = Number(state.editingCommunityReviewStars || 0);
+      const next = roundStarsTenth(Math.max(0.1, (cur > 0 ? cur : 0.2) - 0.1));
+      updateCommEditRevStarsInPlace(next);
+      animateSmoothSliderToStars(commEditRevSlider, next);
+    };
+  }
+  const btnCommEditRevPlus = document.getElementById('btn-comm-edit-rev-plus');
+  if (btnCommEditRevPlus) {
+    btnCommEditRevPlus.onclick = (e) => {
+      e.stopPropagation();
+      const cur = Number(state.editingCommunityReviewStars || 0);
+      const next = roundStarsTenth(Math.min(5.0, (cur > 0 ? cur : 0) + 0.1));
+      updateCommEditRevStarsInPlace(next);
+      animateSmoothSliderToStars(commEditRevSlider, next);
+    };
+  }
+  if (commEditRevSlider) {
+    bindSmoothRatingSlider(commEditRevSlider, {
+      stopProp: true,
+      onLive: (nextStars) => updateCommEditRevStarsInPlace(nextStars)
+    });
+  }
+  const inpCommEditRevNote = document.getElementById('inp-comm-edit-rev-note');
+  if (inpCommEditRevNote) {
+    inpCommEditRevNote.oninput = (e) => {
+      state.editingCommunityReviewNote = e.target.value;
+    };
+  }
+  const btnCommEditRevCancel = document.getElementById('btn-comm-edit-rev-cancel');
+  if (btnCommEditRevCancel) {
+    btnCommEditRevCancel.onclick = (e) => {
+      e.stopPropagation();
+      state.editingCommunityReviewAnimeId = null;
+      state.editingCommunityReviewSaving = false;
+      renderApp();
+    };
+  }
+  const btnCommEditRevSave = document.getElementById('btn-comm-edit-rev-save');
+  if (btnCommEditRevSave) {
+    btnCommEditRevSave.onclick = async (e) => {
+      e.stopPropagation();
+      if (state.editingCommunityReviewSaving) return;
+      const aid = Number(state.editingCommunityReviewAnimeId || state.communityCommentsAnimeId);
+      if (!aid) return;
+      const noteText = (document.getElementById('inp-comm-edit-rev-note')?.value ?? state.editingCommunityReviewNote ?? '').trim();
+      const stars = roundStarsTenth(state.editingCommunityReviewStars || 0);
+      if (!noteText && stars <= 0) {
+        state.communityNoteError = 'Please select a star rating or enter a review note.';
+        state.communityNoteFeedback = '';
+        renderApp();
+        return;
+      }
+      const allGroups = groupCommunityReviewsByAnime(state.communityReviews);
+      const grp = allGroups.find((g) => Number(g.anime_id) === aid);
+      const rating10Val = stars > 0 ? starsToRating10(stars) : null;
+
+      state.editingCommunityReviewSaving = true;
+      state.communityNoteFeedback = '';
+      state.communityNoteError = '';
+      renderApp();
+      try {
+        await submitCommunityCommentNote(aid, rating10Val, noteText, grp || null, {
+          throwOnError: true,
+          silentToast: true,
+          replaceNote: true
+        });
+        state.editingCommunityReviewAnimeId = null;
+        state.communityCommentDraftStars = stars;
+        state.communityCommentDraftNote = noteText;
+        if (state.detailAnime && Number(state.detailAnime.animeId) === aid) {
+          state.detailNoteDraft = noteText;
+        }
+        state.communityNoteFeedback = 'Review updated successfully';
+        showToast(state.communityNoteFeedback);
+      } catch (err) {
+        state.communityNoteError = err?.message || 'Failed to update review. Please try again.';
+        showToast(state.communityNoteError, true);
+      } finally {
+        state.editingCommunityReviewSaving = false;
+        renderApp();
+      }
+    };
+  }
+
   const btnCommModalSubmit = document.getElementById('btn-comm-modal-submit');
   if (btnCommModalSubmit) {
     btnCommModalSubmit.onclick = async () => {
@@ -12112,6 +12391,7 @@ function bindAppEvents() {
 
       const allGroups = groupCommunityReviewsByAnime(state.communityReviews);
       const grp = allGroups.find((g) => Number(g.anime_id) === aid);
+      const hadMyRev = Boolean(state.session && grp?.reviews?.some((r) => r.user_id === state.session.userId));
       const rating10Val = stars > 0 ? starsToRating10(stars) : null;
 
       state.communityNoteSaving = true;
@@ -12119,10 +12399,22 @@ function bindAppEvents() {
       state.communityNoteError = '';
       renderApp();
       try {
-        // Part 1: Adding a community note/comment/rating NEVER adds the anime to Home
-        await submitCommunityCommentNote(aid, rating10Val, noteText, grp || null, { throwOnError: true, silentToast: true });
-        state.communityCommentDraftNote = '';
-        state.communityNoteFeedback = noteText ? 'Comment posted successfully' : `Rated ${stars.toFixed(1)} ★`;
+        // Part 1: Adding or updating a community note/comment/rating NEVER adds the anime to Home
+        await submitCommunityCommentNote(aid, rating10Val, noteText, grp || null, {
+          throwOnError: true,
+          silentToast: true,
+          replaceNote: true
+        });
+        state.communityCommentDraftNote = noteText;
+        state.communityCommentDraftStars = stars;
+        if (state.detailAnime && Number(state.detailAnime.animeId) === aid) {
+          state.detailNoteDraft = noteText;
+        }
+        state.communityNoteFeedback = hadMyRev
+          ? 'Review updated successfully'
+          : noteText
+          ? 'Review posted successfully'
+          : `Rated ${stars.toFixed(1)} ★`;
         showToast(state.communityNoteFeedback);
       } catch (err) {
         state.communityNoteError = err?.message || 'Failed to post. Please try again.';
@@ -12295,41 +12587,75 @@ function bindAppEvents() {
   }
   const saveDetailRatingOrNote = async (rating10Val, noteText, actionKind = 'rating', { silent = false } = {}) => {
     clearDetailRatingAutoSave();
-    if (!state.detailAnime || state.detailRatingSaving) return;
+    if (!state.detailAnime) return;
+    if (!silent && state.detailRatingSaving) return;
+
+    const liveNoteEl = document.getElementById('inp-detail-notes');
+    const currentLiveNote = liveNoteEl ? liveNoteEl.value : (state.detailNoteDraft ?? state.detailAnime.reviewNotes ?? '');
+    const nextRating10 = rating10Val !== undefined ? rating10Val : state.detailAnime.rating10;
+    const nextNotes = noteText !== undefined ? noteText : String(currentLiveNote || '').trim();
+
+    const cleanRating = clampRating10(nextRating10);
+    const cleanNotes = String(nextNotes || '').trim();
+
+    if (!cleanRating && !cleanNotes) {
+      if (!silent) {
+        state.detailRatingFeedback = '';
+        state.detailRatingError = 'Please select a star rating or write a review note first.';
+        renderApp();
+      }
+      return;
+    }
+
     const hadRatingBefore = Boolean(state.detailAnime.rating10 && Number(state.detailAnime.rating10) > 0);
-    state.detailRatingSaving = true;
+    const mySeq = !silent ? ++detailExplicitSaveSeq : detailExplicitSaveSeq;
+
+    // Never disable the Save button or trigger DOM re-renders during silent background auto-save
     if (!silent) {
+      state.detailRatingSaving = true;
       state.detailRatingFeedback = '';
       state.detailRatingError = '';
     }
-    const nextRating10 = rating10Val ?? state.detailAnime.rating10;
-    const nextNotes = noteText !== undefined ? noteText : state.detailAnime.reviewNotes;
-    state.detailAnime = { ...state.detailAnime, rating10: nextRating10, reviewNotes: nextNotes };
-    if (!silent) renderApp();
+
+    state.detailAnime = { ...state.detailAnime, rating10: cleanRating, reviewNotes: cleanNotes };
+    if (!silent) {
+      state.detailNoteDraft = cleanNotes;
+      renderApp();
+    }
+
     try {
       if (state.detailAnime.inWatchlist) {
         await saveVaultEntry(
           {
             ...state.detailAnime,
-            rating10: nextRating10,
-            reviewNotes: nextNotes
+            rating10: cleanRating,
+            reviewNotes: cleanNotes
           },
           { addToHome: false, throwOnError: true }
         );
       } else {
         await submitCommunityCommentNote(
           state.detailAnime.animeId,
-          nextRating10,
-          nextNotes,
+          cleanRating,
+          cleanNotes,
           state.detailAnime,
-          { throwOnError: true, silentToast: true }
+          {
+            throwOnError: true,
+            silentToast: true,
+            silentRender: silent,
+            replaceNote: true
+          }
         );
       }
       if (!silent) {
-        const starsStr = nextRating10 ? `${(Number(nextRating10) / 2).toFixed(1)} ★` : '';
+        const starsStr = cleanRating ? `${(Number(cleanRating) / 2).toFixed(1)} ★` : '';
         const msg =
           actionKind === 'note'
-            ? (String(nextNotes || '').trim() ? 'Review note & rating saved successfully' : 'Rating saved successfully')
+            ? cleanNotes && starsStr
+              ? 'Review note & rating saved successfully'
+              : cleanNotes
+              ? 'Review note saved successfully'
+              : 'Rating saved successfully'
             : hadRatingBefore
             ? `Rating updated to ${starsStr}`
             : `Rating saved (${starsStr})`;
@@ -12338,17 +12664,20 @@ function bindAppEvents() {
       }
     } catch (err) {
       if (!silent) {
-        state.detailRatingError = err?.message || 'Failed to save rating. Please try again.';
+        state.detailRatingError = err?.message || 'Failed to save rating & note. Please try again.';
         showToast(state.detailRatingError, true);
       }
     } finally {
-      state.detailRatingSaving = false;
-      if (!silent) renderApp();
+      if (!silent && mySeq === detailExplicitSaveSeq) {
+        state.detailRatingSaving = false;
+        renderApp();
+      }
     }
   };
   const detailStarSlider = document.getElementById('detail-star-slider');
   const updateDetailStarsInPlace = (nextStars) => {
     if (!state.detailAnime) return;
+    detailUserTouchedRating = true;
     const r10 = starsToRating10(nextStars);
     state.detailAnime = { ...state.detailAnime, rating10: r10 };
     const headingEl = document.getElementById('detail-star-heading');
@@ -12372,7 +12701,10 @@ function bindAppEvents() {
     detailRatingAutoSaveTimer = setTimeout(() => {
       detailRatingAutoSaveTimer = null;
       if (activeRatingSliderDragCount > 0) return;
+      if (state.detailRatingSaving) return;
       if (!state.detailAnime || Number(state.detailAnime.animeId) !== targetAid) return;
+      // Do not interrupt while user is actively typing a note
+      if (document.activeElement && document.activeElement.id === 'inp-detail-notes') return;
       saveDetailRatingOrNote(starsToRating10(nextStars), undefined, 'rating', { silent: true });
     }, 3000);
   };
@@ -12428,16 +12760,23 @@ function bindAppEvents() {
   }
   const inpDetailNotes = document.getElementById('inp-detail-notes');
   if (inpDetailNotes) {
+    inpDetailNotes.onfocus = () => {
+      clearDetailRatingAutoSave();
+    };
     inpDetailNotes.oninput = (e) => {
+      clearDetailRatingAutoSave();
+      detailUserTouchedNote = true;
       state.detailNoteDraft = e.target.value;
     };
   }
   const btnSaveNote = document.getElementById('btn-detail-save-note');
   if (btnSaveNote && state.detailAnime) {
     btnSaveNote.onclick = async () => {
+      clearDetailRatingAutoSave();
       const notes = (document.getElementById('inp-detail-notes')?.value ?? state.detailNoteDraft ?? '').trim();
+      detailUserTouchedNote = true;
       state.detailNoteDraft = notes;
-      await saveDetailRatingOrNote(state.detailAnime.rating10, notes, 'note');
+      await saveDetailRatingOrNote(state.detailAnime.rating10, notes, 'note', { silent: false });
     };
   }
 
@@ -12537,7 +12876,7 @@ function bindAppEvents() {
   // Open unseen tagged anime card directly in Live Chat modal (supports both new & older templates)
   document.querySelectorAll('[data-open-unseen-anime]').forEach((el) => {
     el.onclick = (e) => {
-      if (e.target.closest('[data-open-comments]')) return;
+      if (e.target.closest('[data-open-comments]') || e.target.closest('[data-open-edit-review]')) return;
       const aid = Number(el.getAttribute('data-open-unseen-anime'));
       if (!aid) return;
       openCommunityHubForAnime(aid, {
@@ -12836,6 +13175,8 @@ function bindAppEvents() {
     state.communityCommentsAnimeId = null;
     state.communityCommentsAnimeFallback = null;
     state.pendingCommunityReplyUser = null;
+    state.editingCommunityReviewAnimeId = null;
+    state.editingCommunityReviewSaving = false;
     state.confirmRemoveHomeAnime = null;
     state.contextMenu = null;
     state.collectionContextMenu = null;
@@ -13135,21 +13476,33 @@ const NativeNotificationBridge = {
   },
 
   async syncAuthToTauri(session) {
+    if (!session?.userId || !session?.accessToken) return;
+    const supabaseUrl = getVaultBaseUrl();
+    const anonKey = getVaultPublicKey();
+    const accessToken = session.accessToken;
+    const refreshToken = session.refreshToken || '';
+    const userId = session.userId;
+
+    if (typeof window !== 'undefined' && window.AnimeNativeBridge && typeof window.AnimeNativeBridge.syncAuthSession === 'function') {
+      try {
+        window.AnimeNativeBridge.syncAuthSession(supabaseUrl, anonKey, accessToken, refreshToken, userId);
+      } catch (_) {}
+    }
+
     const invoke = this.getTauriInvoke();
-    if (!invoke || !session?.userId || !session?.accessToken) return;
+    if (!invoke) return;
     try {
       await invoke('sync_notification_auth', {
-        supabaseUrl: getVaultBaseUrl(),
-        anonKey: getVaultPublicKey(),
-        accessToken: session.accessToken,
-        refreshToken: session.refreshToken || '',
-        userId: session.userId
+        supabaseUrl,
+        anonKey,
+        accessToken,
+        refreshToken,
+        userId
       });
     } catch (_) {}
   },
 
   async clearAuthInTauri() {
-    const invoke = this.getTauriInvoke();
     this.knownUnreadIds.clear();
     this.hasPrimedUnread = false;
     this.alertedIds.clear();
@@ -13157,6 +13510,10 @@ const NativeNotificationBridge = {
     if (state.session) {
       await this.unregisterDeviceFromBackend().catch(() => {});
     }
+    if (typeof window !== 'undefined' && window.AnimeNativeBridge && typeof window.AnimeNativeBridge.clearAuthSession === 'function') {
+      try { window.AnimeNativeBridge.clearAuthSession(); } catch (_) {}
+    }
+    const invoke = this.getTauriInvoke();
     if (!invoke) return;
     try {
       await invoke('clear_notification_auth');
@@ -13164,24 +13521,49 @@ const NativeNotificationBridge = {
   },
 
   async markSeenInNative(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return;
+    const cleanIds = ids.map(String);
+    if (typeof window !== 'undefined' && window.AnimeNativeBridge && typeof window.AnimeNativeBridge.markSeenIds === 'function') {
+      try {
+        window.AnimeNativeBridge.markSeenIds(JSON.stringify(cleanIds));
+      } catch (_) {}
+    }
     const invoke = this.getTauriInvoke();
-    if (!invoke || !Array.isArray(ids) || ids.length === 0) return;
+    if (!invoke) return;
     try {
-      await invoke('mark_seen_notification_ids', { ids: ids.map(String) });
+      await invoke('mark_seen_notification_ids', { ids: cleanIds });
     } catch (_) {}
   },
 
   async syncLocalPrefsToNative() {
+    const ns = state.notificationSettings || {};
+    const masterEnabled = ns.master_enabled !== false;
+    const messagesEnabled = ns.messages_enabled !== false;
+    const updatesEnabled = ns.updates_enabled !== false;
+    const remindersEnabled = ns.reminders_enabled !== false;
+    const osPermissionStatus = String(state.osNotifPermission || ns.os_permission_status || 'prompt');
+
+    if (typeof window !== 'undefined' && window.AnimeNativeBridge && typeof window.AnimeNativeBridge.syncLocalPrefs === 'function') {
+      try {
+        window.AnimeNativeBridge.syncLocalPrefs(
+          masterEnabled,
+          messagesEnabled,
+          updatesEnabled,
+          remindersEnabled,
+          osPermissionStatus
+        );
+      } catch (_) {}
+    }
+
     const invoke = this.getTauriInvoke();
     if (!invoke) return;
-    const ns = state.notificationSettings || {};
     try {
       await invoke('sync_local_notification_preferences', {
-        masterEnabled: ns.master_enabled !== false,
-        messagesEnabled: ns.messages_enabled !== false,
-        updatesEnabled: ns.updates_enabled !== false,
-        remindersEnabled: ns.reminders_enabled !== false,
-        osPermissionStatus: String(state.osNotifPermission || ns.os_permission_status || 'prompt')
+        masterEnabled,
+        messagesEnabled,
+        updatesEnabled,
+        remindersEnabled,
+        osPermissionStatus
       });
     } catch (_) {}
   },
@@ -13321,7 +13703,12 @@ const NativeNotificationBridge = {
 
         const dismissedLocal = localStorage.getItem('au_notif_onboarding_dismissed_v1') === 'true';
         const dismissedCloud = Boolean(state.notificationSettings?.onboarding_dismissed);
-        if (!this.onboardingEvaluated && !dismissedLocal && !dismissedCloud && state.session) {
+        // On native apps (Android/Windows/macOS), never let another device's cloud onboarding_dismissed
+        // flag block asking for OS notification permission on a fresh device install.
+        const shouldSuppressPrompt = isTauriAppEnvironment()
+          ? dismissedLocal
+          : (dismissedLocal || dismissedCloud);
+        if (!this.onboardingEvaluated && !shouldSuppressPrompt && state.session) {
           this.onboardingEvaluated = true;
           state.showFirstTimeNotifPopup = true;
           state.firstTimeNotifDeniedGuide = perm === 'denied';
@@ -13366,7 +13753,7 @@ const NativeNotificationBridge = {
             } catch (_) {
               finish('denied');
             }
-          }, 15000);
+          }, 45000);
           window.AnimeNativeBridge.requestPermission();
         });
         const finalPerm = this.applyResolvedOsPermission(bridgeStatus === 'granted' ? 'granted' : 'denied');
@@ -13933,10 +14320,9 @@ const NativeNotificationBridge = {
     if (nid) {
       this.alertedIds.add(nid);
       this.knownUnreadIds.add(nid);
-      this.markSeenInNative([nid]);
     }
     this.showInAppBanner(payload);
-    await this.sendOsNotificationBar(payload.title, payload.body, {
+    const delivered = await this.sendOsNotificationBar(payload.title, payload.body, {
       notificationId: nid,
       type: payload.type || 'message',
       animeId: payload.animeId || null,
@@ -13946,19 +14332,28 @@ const NativeNotificationBridge = {
       threadId: payload.threadId || null,
       replyId: payload.replyId || null
     });
+    if (nid && (delivered || !isTauriAppEnvironment())) {
+      this.markSeenInNative([nid]);
+    }
   },
 
-  async alertNewlyDetectedUnread(notifId, summary) {
+  async alertNewlyDetectedUnread(notifId, summary, rowMeta = null) {
     if (!notifId || this.alertedIds.has(notifId)) return;
     const rawList = Array.isArray(summary?.anime) ? summary.anime : [];
-    const top = rawList[0] || null;
-    const ntype = top?.latest_notification_type || 'message';
+    const matchingAnime = rowMeta?.animeId
+      ? rawList.find((a) => Number(a.anime_id) === Number(rowMeta.animeId))
+      : null;
+    const top = matchingAnime || rawList[0] || null;
+    const ntype = rowMeta?.type || top?.latest_notification_type || 'message';
     if (!this.isCategoryEnabled(ntype)) return;
     const actionWord = ntype === 'reply' ? 'replied to you' : 'tagged you';
-    const sender = top?.latest_sender_username || 'Community Member';
-    const title = top?.anime_title ? `${sender} ${actionWord} • ${top.anime_title}` : 'Anime Universe • New Notification';
-    const body = top?.latest_preview
-      ? formatPlainPreviewWithEmojis(top.latest_preview).slice(0, 120)
+    const sender = rowMeta?.senderName || top?.latest_sender_username || 'Community Member';
+    const title =
+      (rowMeta?.title && String(rowMeta.title).trim()) ||
+      (top?.anime_title ? `${sender} ${actionWord} • ${top.anime_title}` : 'Anime Universe • New Notification');
+    const rawBody = (rowMeta?.body && String(rowMeta.body).trim()) || top?.latest_preview || '';
+    const body = rawBody
+      ? formatPlainPreviewWithEmojis(rawBody).slice(0, 140)
       : 'Open Anime Universe to view your new notification.';
     await this.dispatchAlert({
       id: notifId,
@@ -13966,8 +14361,8 @@ const NativeNotificationBridge = {
       body,
       type: ntype,
       senderName: sender,
-      senderAvatar: top?.latest_sender_avatar_key || 'avatar_1',
-      animeId: top?.anime_id || null,
+      senderAvatar: rowMeta?.senderAvatar || top?.latest_sender_avatar_key || 'avatar_1',
+      animeId: rowMeta?.animeId || top?.anime_id || null,
       animeTitle: top?.anime_title || '',
       animeCover: top?.anime_cover_image || '',
       commentId: top?.latest_comment_id || null,
@@ -14009,7 +14404,12 @@ const NotificationRealtimeManager = {
   reconnectId: null,
   connectedUserId: null,
   connectedToken: null,
+  lastActivityAt: 0,
   refCounter: 1,
+  forceReconnect() {
+    this.disconnect();
+    this.ensureConnected();
+  },
   ensureConnected() {
     const uid = state.session?.userId;
     const token = state.session?.accessToken;
@@ -14017,7 +14417,13 @@ const NotificationRealtimeManager = {
       this.disconnect();
       return;
     }
+    const staleSocket =
+      this.ws &&
+      this.ws.readyState === 1 &&
+      this.lastActivityAt > 0 &&
+      Date.now() - this.lastActivityAt > 60000;
     if (
+      !staleSocket &&
       this.connectedUserId === uid &&
       this.connectedToken === token &&
       this.ws &&
@@ -14038,7 +14444,9 @@ const NotificationRealtimeManager = {
       this.ws = ws;
       this.connectedUserId = uid;
       this.connectedToken = token;
+      this.lastActivityAt = Date.now();
       ws.onopen = () => {
+        this.lastActivityAt = Date.now();
         const joinRef = String(this.refCounter++);
         ws.send(JSON.stringify({
           topic,
@@ -14063,12 +14471,22 @@ const NotificationRealtimeManager = {
         ws.send(JSON.stringify({ topic, event: 'access_token', payload: { access_token: token }, ref: String(this.refCounter++) }));
         this.heartbeatId = setInterval(() => {
           if (ws.readyState === 1) {
-            ws.send(JSON.stringify({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: String(this.refCounter++) }));
+            if (this.lastActivityAt > 0 && Date.now() - this.lastActivityAt > 60000) {
+              // Zombie TCP socket (common on Android after switching to Settings/background)
+              this.forceReconnect();
+              return;
+            }
+            try {
+              ws.send(JSON.stringify({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: String(this.refCounter++) }));
+            } catch (_) {
+              this.forceReconnect();
+            }
           }
         }, 25000);
         refreshUnreadNotificationCount().then(() => updateCommunityRedDotsInPlace());
       };
       ws.onmessage = (evt) => {
+        this.lastActivityAt = Date.now();
         try {
           const msg = JSON.parse(evt.data);
           if (msg?.event !== 'postgres_changes') return;
@@ -14220,8 +14638,14 @@ function reconcileNotificationsOnReturn(force = false) {
   const now = Date.now();
   if (!force && now - lastNotifReconcileAt < 2500) return;
   lastNotifReconcileAt = now;
+  NativeNotificationBridge.syncAuthToTauri(state.session);
+  NativeNotificationBridge.syncLocalPrefsToNative();
   NativeNotificationBridge.consumePendingNotificationClick();
-  NotificationRealtimeManager.ensureConnected();
+  if (force) {
+    NotificationRealtimeManager.forceReconnect();
+  } else {
+    NotificationRealtimeManager.ensureConnected();
+  }
   refreshUnreadNotificationCount().then(() => updateCommunityRedDotsInPlace());
 }
 
@@ -14274,12 +14698,17 @@ function handleNativePermissionStateSync(perm) {
       syncFirstTimeNotifPopupOverlayDOM();
       showToast('Notifications enabled in system settings!');
     }
-    if (state.session && prev !== 'granted') {
-      NativeNotificationBridge.registerDeviceWithBackend('granted').catch(() => {});
-      NativeNotificationBridge.saveNotificationSettingsToBackend({
-        os_permission_status: 'granted',
-        onboarding_dismissed: true
-      }).catch(() => {});
+    if (state.session) {
+      NativeNotificationBridge.syncAuthToTauri(state.session);
+      NativeNotificationBridge.syncLocalPrefsToNative();
+      if (prev !== 'granted') {
+        NativeNotificationBridge.registerDeviceWithBackend('granted').catch(() => {});
+        NativeNotificationBridge.saveNotificationSettingsToBackend({
+          os_permission_status: 'granted',
+          onboarding_dismissed: true
+        }).catch(() => {});
+        reconcileNotificationsOnReturn(true);
+      }
     }
   } else if (state.session && prev !== normalized) {
     NativeNotificationBridge.registerDeviceWithBackend(normalized).catch(() => {});
@@ -14300,6 +14729,7 @@ if (typeof window !== 'undefined') {
 }
 
 window.addEventListener('focus', () => {
+  reconcileNotificationsOnReturn(true);
   triggerThrottledSilentSync();
   NativeNotificationBridge.detectActualOsPermission()
     .then((perm) => handleNativePermissionStateSync(perm))
@@ -14307,7 +14737,10 @@ window.addEventListener('focus', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) triggerThrottledSilentSync();
+  if (!document.hidden) {
+    reconcileNotificationsOnReturn(true);
+    triggerThrottledSilentSync();
+  }
 });
 
 window.addEventListener('online', () => {

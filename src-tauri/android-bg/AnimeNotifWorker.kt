@@ -15,7 +15,9 @@ import androidx.core.content.ContextCompat
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -115,6 +117,23 @@ object AnimeNotifScheduler {
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
                 ExistingPeriodicWorkPolicy.KEEP,
+                req
+            )
+        }
+    }
+
+    fun triggerImmediateCheck(context: Context) {
+        runCatching {
+            ensureChannels(context)
+            val constraints = Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build()
+            val req = OneTimeWorkRequestBuilder<AnimeNotifWorker>()
+                .setConstraints(constraints)
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                "${WORK_NAME}_immediate",
+                ExistingWorkPolicy.REPLACE,
                 req
             )
         }
@@ -275,7 +294,11 @@ class AnimeNotifWorker(
                 .setContentText(preview)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(preview))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setOnlyAlertOnce(false)
+                .setWhen(System.currentTimeMillis())
+                .setShowWhen(true)
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
                 .build()
