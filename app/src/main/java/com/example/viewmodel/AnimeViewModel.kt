@@ -25,6 +25,7 @@ import com.example.model.CommunityCapacity
 import com.example.model.CommunityEmoji
 import com.example.model.CommunityMember
 import com.example.model.CommunityReview
+import com.example.model.DailyAnimePick
 import com.example.model.DatabaseStorageStats
 import com.example.model.FlatReplyTo
 import com.example.model.InvitationCode
@@ -34,6 +35,9 @@ import com.example.model.NotificationJumpTarget
 import com.example.model.PrivacySettings
 import com.example.model.StarRatingUtils
 import com.example.model.ThemeModePreference
+import com.example.model.TopAnimeRankedItem
+import com.example.model.TopAnimeSource
+import com.example.model.TopAnimeTimeframe
 import com.example.model.UnseenDiscussionAnime
 import com.example.model.UserNotificationItem
 import com.example.model.UserProfile
@@ -157,6 +161,37 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isDiscussionLoading = MutableStateFlow(false)
     val isDiscussionLoading = _isDiscussionLoading.asStateFlow()
+
+    // Community — Random Anime of the Day State (Backend-driven Supabase daily_anime)
+    private val _dailyRandomAnime = MutableStateFlow<DailyAnimePick?>(null)
+    val dailyRandomAnime = _dailyRandomAnime.asStateFlow()
+
+    private val _isDailyRandomLoading = MutableStateFlow(false)
+    val isDailyRandomLoading = _isDailyRandomLoading.asStateFlow()
+
+    private val _dailyRandomError = MutableStateFlow<String?>(null)
+    val dailyRandomError = _dailyRandomError.asStateFlow()
+    private var dailyRandomFetchedUtcDate: String? = null
+
+    // Community — Top Anime Catalogue State
+    private val _topAnimeSource = MutableStateFlow(TopAnimeSource.ALL)
+    val topAnimeSource = _topAnimeSource.asStateFlow()
+
+    private val _topAnimeLimit = MutableStateFlow(10)
+    val topAnimeLimit = _topAnimeLimit.asStateFlow()
+
+    private val _topAnimeTimeframe = MutableStateFlow(TopAnimeTimeframe.ALL_TIME)
+    val topAnimeTimeframe = _topAnimeTimeframe.asStateFlow()
+
+    private val _topAnimeItems = MutableStateFlow<List<TopAnimeRankedItem>>(emptyList())
+    val topAnimeItems = _topAnimeItems.asStateFlow()
+
+    private val _isTopAnimeLoading = MutableStateFlow(false)
+    val isTopAnimeLoading = _isTopAnimeLoading.asStateFlow()
+
+    private val _topAnimeError = MutableStateFlow<String?>(null)
+    val topAnimeError = _topAnimeError.asStateFlow()
+    private var topAnimeRequestSeq = 0L
 
     private val _isDiscussionSubmitting = MutableStateFlow(false)
     val isDiscussionSubmitting = _isDiscussionSubmitting.asStateFlow()
@@ -3777,6 +3812,156 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                 _userMessage.value = "Import failed: ${ErrorSanitizer.sanitize(e, "Unable to read backup file.")}"
             }
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // COMMUNITY — RANDOM ANIME OF THE DAY & TOP ANIME CATALOGUE
+    // ------------------------------------------------------------------------
+
+    fun loadDailyRandomAnime(forceRefresh: Boolean = false) {
+        val todayUtc = LocalDate.now(java.time.ZoneOffset.UTC).toString()
+        if (!forceRefresh && _dailyRandomAnime.value != null && dailyRandomFetchedUtcDate == todayUtc) {
+            return
+        }
+        viewModelScope.launch {
+            _isDailyRandomLoading.value = true
+            _dailyRandomError.value = null
+
+            val session = _authSession.value?.let {
+                supabaseAuth.refreshSessionIfNeeded(it).getOrDefault(it)
+            }
+            supabaseDb.fetchDailyRandomAnime(session)
+                .onSuccess { pick ->
+                    _dailyRandomAnime.value = pick
+                    dailyRandomFetchedUtcDate = todayUtc
+                    _dailyRandomError.value = null
+                }
+                .onFailure { err ->
+                    _dailyRandomError.value = err.message ?: "Unable to load today's featured anime."
+                }
+            _isDailyRandomLoading.value = false
+        }
+    }
+
+    fun setTopAnimeSource(source: TopAnimeSource) {
+        if (_topAnimeSource.value == source && _topAnimeItems.value.isNotEmpty()) return
+        _topAnimeSource.value = source
+        loadTopAnime(forceRefresh = false)
+    }
+
+    fun setTopAnimeLimit(limit: Int) {
+        val safeLimit = if (limit in listOf(10, 25, 50, 100)) limit else 10
+        if (_topAnimeLimit.value == safeLimit && _topAnimeItems.value.isNotEmpty()) return
+        _topAnimeLimit.value = safeLimit
+        loadTopAnime(forceRefresh = false)
+    }
+
+    fun setTopAnimeTimeframe(timeframe: TopAnimeTimeframe) {
+        if (_topAnimeTimeframe.value == timeframe && _topAnimeItems.value.isNotEmpty()) return
+        _topAnimeTimeframe.value = timeframe
+        loadTopAnime(forceRefresh = false)
+    }
+
+    fun loadTopAnime(forceRefresh: Boolean = false) {
+        val source = _topAnimeSource.value
+        val limit = _topAnimeLimit.value
+        val timeframe = _topAnimeTimeframe.value
+        val reqSeq = ++topAnimeRequestSeq
+
+        if (source == TopAnimeSource.COMMUNITY) {
+            _isTopAnimeLoading.value = false
+            _topAnimeError.value = null
+            _topAnimeItems.value = computeCommunityTopAnime(timeframe, limit)
+            return
+        }
+
+        viewModelScope.launch {
+            _isTopAnimeLoading.value = true
+            _topAnimeError.value = null
+            metadataProvider.fetchTopAnimeRankings(
+                timeframe = timeframe,
+                limit = limit,
+                forceRefresh = forceRefresh
+            ).onSuccess { items ->
+                if (reqSeq == topAnimeRequestSeq) {
+                    _topAnimeItems.value = items
+                    _topAnimeError.value = null
+                }
+            }.onFailure { err ->
+                if (reqSeq == topAnimeRequestSeq) {
+                    _topAnimeError.value = err.message ?: "Could not load rankings right now. Please try again."
+                }
+            }
+            if (reqSeq == topAnimeRequestSeq) {
+                _isTopAnimeLoading.value = false
+            }
+        }
+    }
+
+    private fun computeCommunityTopAnime(timeframe: TopAnimeTimeframe, limit: Int): List<TopAnimeRankedItem> {
+        val cutoffMillis = when (timeframe) {
+            TopAnimeTimeframe.WEEKLY -> System.currentTimeMillis() - 7L * 86_400_000L
+            TopAnimeTimeframe.MONTHLY -> System.currentTimeMillis() - 30L * 86_400_000L
+            TopAnimeTimeframe.SEASONAL -> System.currentTimeMillis() - 90L * 86_400_000L
+            TopAnimeTimeframe.YEARLY -> System.currentTimeMillis() - 365L * 86_400_000L
+            TopAnimeTimeframe.ALL_TIME -> 0L
+        }
+
+        data class Bucket(
+            val animeId: Int,
+            val title: String,
+            val coverImage: String,
+            val episodes: Int?,
+            val genres: List<String>,
+            var ratingSum10: Double = 0.0,
+            var count: Int = 0
+        )
+
+        val buckets = LinkedHashMap<Int, Bucket>()
+        for (rev in _communityReviews.value) {
+            val rating10 = rev.rating ?: continue
+            if (rating10 <= 0.0) continue
+            if (cutoffMillis > 0L) {
+                val ts = runCatching {
+                    Instant.parse(rev.updatedAt).toEpochMilli()
+                }.getOrElse {
+                    runCatching { java.time.OffsetDateTime.parse(rev.updatedAt).toInstant().toEpochMilli() }.getOrDefault(0L)
+                }
+                if (ts < cutoffMillis) continue
+            }
+            val b = buckets.getOrPut(rev.animeId) {
+                Bucket(
+                    animeId = rev.animeId,
+                    title = rev.animeTitle.ifBlank { "Anime #${rev.animeId}" },
+                    coverImage = rev.animeCoverImage,
+                    episodes = rev.totalEpisodes,
+                    genres = rev.genres.take(3)
+                )
+            }
+            b.ratingSum10 += rating10
+            b.count += 1
+        }
+
+        return buckets.values
+            .sortedWith(
+                compareByDescending<Bucket> { it.ratingSum10 / it.count.coerceAtLeast(1) }
+                    .thenByDescending { it.count }
+            )
+            .take(limit)
+            .map { b ->
+                val avgStars = (b.ratingSum10 / b.count.coerceAtLeast(1)) / 2.0
+                TopAnimeRankedItem(
+                    animeId = b.animeId,
+                    title = b.title,
+                    coverImage = b.coverImage,
+                    scoreDisplay = "%.1f".format(java.util.Locale.US, avgStars),
+                    voteCount = b.count,
+                    formatLabel = "",
+                    releaseYear = null,
+                    episodes = b.episodes,
+                    genres = b.genres
+                )
+            }
     }
 
     override fun onCleared() {

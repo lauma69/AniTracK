@@ -12,6 +12,9 @@ import com.example.model.AnimeRecommendationItem
 import com.example.model.AnimeRelationItem
 import com.example.model.AnimeRichDetail
 import com.example.model.AnimeSeasonEntry
+import com.example.model.DailyAnimeFormatters
+import com.example.model.TopAnimeRankedItem
+import com.example.model.TopAnimeTimeframe
 import com.example.util.EnglishTitleMapper
 import com.example.util.EpisodeDataParser
 import com.example.util.ErrorSanitizer
@@ -41,8 +44,14 @@ class AniListMetadataProvider(
         val hasNext: Boolean
     )
 
+    private data class CachedTopRanking(
+        val timestampMs: Long,
+        val items: List<TopAnimeRankedItem>
+    )
+
     private val seasonNodeCache = ConcurrentHashMap<Int, AniListMedia>()
     private val searchCache = ConcurrentHashMap<String, CachedSearchPage>()
+    private val topRankingCache = ConcurrentHashMap<String, CachedTopRanking>()
     private val fallbackHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(12, TimeUnit.SECONDS)
@@ -561,6 +570,206 @@ class AniListMetadataProvider(
             franchiseId = resolved.franchiseId,
             rawMainSeasonNodeCount = resolved.rawMainSeasonNodeCount
         )
+    }
+
+    suspend fun fetchTopAnimeRankings(
+        timeframe: TopAnimeTimeframe,
+        limit: Int,
+        forceRefresh: Boolean = false
+    ): Result<List<TopAnimeRankedItem>> = withContext(Dispatchers.IO) {
+        val safeLimit = limit.coerceIn(10, 100)
+        val cacheKey = "${timeframe.key}|$safeLimit"
+        if (!forceRefresh) {
+            val cached = topRankingCache[cacheKey]
+            if (cached != null && (System.currentTimeMillis() - cached.timestampMs) < 300_000L) {
+                return@withContext Result.success(cached.items)
+            }
+        }
+
+        try {
+            val now = java.time.LocalDate.now(java.time.ZoneOffset.UTC)
+            val currentYear = now.year
+            val currentSeason = when (now.monthValue) {
+                in 1..3 -> "WINTER"
+                in 4..6 -> "SPRING"
+                in 7..9 -> "SUMMER"
+                else -> "FALL"
+            }
+            val sixMonthsAgo = now.minusMonths(6)
+            val sixMonthsFuzzy = sixMonthsAgo.year * 10000 + sixMonthsAgo.monthValue * 100 + sixMonthsAgo.dayOfMonth
+
+            val hasSeason = timeframe == TopAnimeTimeframe.SEASONAL
+            val hasSeasonYear = timeframe == TopAnimeTimeframe.SEASONAL || timeframe == TopAnimeTimeframe.YEARLY
+            val hasStartDateGreater = timeframe == TopAnimeTimeframe.MONTHLY
+            val gqlQuery = AniListQueries.buildTopRankingsQuery(
+                hasSeason = hasSeason,
+                hasSeasonYear = hasSeasonYear,
+                hasStartDateGreater = hasStartDateGreater
+            )
+
+            suspend fun fetchPage(page: Int, perPage: Int): List<AniListMedia> {
+                val vars = mutableMapOf<String, Any?>(
+                    "page" to page,
+                    "perPage" to perPage
+                )
+                when (timeframe) {
+                    TopAnimeTimeframe.WEEKLY -> {
+                        vars["sort"] = listOf("TRENDING_DESC", "SCORE_DESC")
+                    }
+                    TopAnimeTimeframe.MONTHLY -> {
+                        vars["sort"] = listOf("POPULARITY_DESC", "SCORE_DESC")
+                        vars["startDateGreater"] = sixMonthsFuzzy
+                    }
+                    TopAnimeTimeframe.SEASONAL -> {
+                        vars["sort"] = listOf("SCORE_DESC", "POPULARITY_DESC")
+                        vars["season"] = currentSeason
+                        vars["seasonYear"] = currentYear
+                    }
+                    TopAnimeTimeframe.YEARLY -> {
+                        vars["sort"] = listOf("SCORE_DESC", "POPULARITY_DESC")
+                        vars["seasonYear"] = currentYear
+                    }
+                    TopAnimeTimeframe.ALL_TIME -> {
+                        vars["sort"] = listOf("SCORE_DESC", "POPULARITY_DESC")
+                    }
+                }
+                val resp = executeWithRetry {
+                    apiService.queryMedia(
+                        AniListRequest(
+                            query = gqlQuery,
+                            variables = vars
+                        )
+                    )
+                }
+                if (resp == null || !resp.isSuccessful) {
+                    throw Exception("Unable to load rankings right now.")
+                }
+                return resp.body()?.data?.Page?.media.orEmpty()
+            }
+
+            val rawMedia = try {
+                if (safeLimit <= 50) {
+                    fetchPage(1, safeLimit)
+                } else {
+                    val p1 = fetchPage(1, 50)
+                    val p2 = fetchPage(2, 50)
+                    p1 + p2
+                }
+            } catch (_: Exception) {
+                fetchJikanTopFallback(timeframe, safeLimit)
+            }
+
+            if (rawMedia.isEmpty()) {
+                val fallback = fetchJikanTopFallback(timeframe, safeLimit)
+                if (fallback.isNotEmpty()) {
+                    val mappedFallback = mapRankedItems(fallback, safeLimit)
+                    topRankingCache[cacheKey] = CachedTopRanking(System.currentTimeMillis(), mappedFallback)
+                    return@withContext Result.success(mappedFallback)
+                }
+            }
+
+            val ranked = mapRankedItems(rawMedia, safeLimit)
+            topRankingCache[cacheKey] = CachedTopRanking(System.currentTimeMillis(), ranked)
+            Result.success(ranked)
+        } catch (e: Exception) {
+            Result.failure(Exception("Could not load rankings right now. Please try again."))
+        }
+    }
+
+    private fun mapRankedItems(rawMedia: List<AniListMedia>, safeLimit: Int): List<TopAnimeRankedItem> {
+        val seen = HashSet<Int>()
+        val ranked = ArrayList<TopAnimeRankedItem>(safeLimit)
+        for (media in rawMedia) {
+            if (media.id <= 0 || !seen.add(media.id)) continue
+            val isDonghua = media.countryOfOrigin.equals("CN", ignoreCase = true)
+            val resolvedTitle = EnglishTitleMapper.resolve(
+                titleEnglish = media.title?.english,
+                titleRomaji = media.title?.romaji ?: media.title?.userPreferred,
+                synonyms = media.synonyms,
+                isDonghua = isDonghua
+            )?.takeIf { it.isNotBlank() }
+                ?: media.title?.english?.takeIf { it.isNotBlank() }
+                ?: media.title?.userPreferred?.takeIf { it.isNotBlank() }
+                ?: media.title?.romaji?.takeIf { it.isNotBlank() }
+                ?: "Anime #${media.id}"
+            val avgScore = media.averageScore
+            val scoreDisplay = if (avgScore != null && avgScore > 0) {
+                "%.1f".format(java.util.Locale.US, avgScore / 10.0)
+            } else {
+                "—"
+            }
+            ranked.add(
+                TopAnimeRankedItem(
+                    animeId = media.id,
+                    title = resolvedTitle,
+                    coverImage = media.coverImage?.extraLarge ?: media.coverImage?.large.orEmpty(),
+                    scoreDisplay = scoreDisplay,
+                    voteCount = null,
+                    formatLabel = media.format?.let { DailyAnimeFormatters.formatFormat(it) }.orEmpty(),
+                    releaseYear = media.seasonYear ?: media.startDate?.year,
+                    episodes = media.episodes,
+                    genres = media.genres.orEmpty().take(3)
+                )
+            )
+            if (ranked.size >= safeLimit) break
+        }
+        return ranked
+    }
+
+    private fun fetchJikanTopFallback(timeframe: TopAnimeTimeframe, limit: Int): List<AniListMedia> {
+        return runCatching {
+            val filter = when (timeframe) {
+                TopAnimeTimeframe.WEEKLY, TopAnimeTimeframe.MONTHLY, TopAnimeTimeframe.SEASONAL -> "&filter=airing"
+                else -> ""
+            }
+            val perPage = 25
+            val pages = ((limit + perPage - 1) / perPage).coerceIn(1, 4)
+            val collected = mutableListOf<AniListMedia>()
+            for (page in 1..pages) {
+                val req = Request.Builder()
+                    .url("https://api.jikan.moe/v4/top/anime?page=$page&limit=$perPage&sfw=true$filter")
+                    .header("Accept", "application/json")
+                    .build()
+                fallbackHttpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val dataArr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("data") ?: return@use
+                    for (i in 0 until dataArr.length()) {
+                        val obj = dataArr.optJSONObject(i) ?: continue
+                        val malId = obj.optInt("mal_id", 0)
+                        if (malId <= 0) continue
+                        val titleDefault = obj.optString("title").takeIf { it.isNotBlank() }
+                        val titleEng = obj.optString("title_english").takeIf { it.isNotBlank() }
+                        val imgJpg = obj.optJSONObject("images")?.optJSONObject("jpg")
+                        val cover = imgJpg?.optString("large_image_url")?.takeIf { it.isNotBlank() }
+                            ?: imgJpg?.optString("image_url").orEmpty()
+                        val scoreFloat = obj.optDouble("score", -1.0)
+                        val score100 = if (scoreFloat > 0.0) (scoreFloat * 10.0).toInt().coerceIn(1, 100) else null
+                        val genresArr = obj.optJSONArray("genres")
+                        val genres = mutableListOf<String>()
+                        if (genresArr != null) {
+                            for (g in 0 until genresArr.length()) {
+                                genresArr.optJSONObject(g)?.optString("name")?.takeIf { it.isNotBlank() }?.let { genres.add(it) }
+                            }
+                        }
+                        collected.add(
+                            AniListMedia(
+                                id = malId,
+                                type = "ANIME",
+                                title = AniListTitle(romaji = titleDefault, english = titleEng, userPreferred = titleEng ?: titleDefault),
+                                coverImage = AniListCoverImage(large = cover, extraLarge = cover),
+                                format = obj.optString("type").uppercase().ifBlank { "TV" },
+                                episodes = obj.optInt("episodes", -1).takeIf { it > 0 },
+                                genres = genres,
+                                averageScore = score100,
+                                seasonYear = obj.optInt("year", -1).takeIf { it > 0 }
+                            )
+                        )
+                    }
+                }
+                if (collected.size >= limit) break
+            }
+            collected
+        }.getOrDefault(emptyList())
     }
 
     companion object {

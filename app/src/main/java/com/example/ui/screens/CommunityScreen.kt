@@ -100,8 +100,27 @@ import com.example.model.StarRatingUtils
 import com.example.model.UnseenDiscussionAnime
 import com.example.model.UserNotificationItem
 import com.example.model.groupCommunityReviewsByAnime
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material.icons.filled.Casino
+import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.launch
 import com.example.service.CommunityEmojiCacheService
 import com.example.ui.components.AnimeDiscussionSection
+import com.example.ui.components.RandomAnimeOfTheDaySection
+import com.example.ui.components.TopAnimeCommunitySection
 import com.example.ui.theme.AppSpacing
 import com.example.ui.theme.AppTheme
 import com.example.ui.theme.CormorantSerifFamily
@@ -179,8 +198,20 @@ fun CommunityScreen(
     val unreadNotificationCount by viewModel.unreadNotificationCount.collectAsState()
     val isNotificationsLoading by viewModel.isNotificationsLoading.collectAsState()
     val hasMoreNotifications by viewModel.hasMoreNotifications.collectAsState()
+    val dailyRandomAnime by viewModel.dailyRandomAnime.collectAsState()
+    val isDailyRandomLoading by viewModel.isDailyRandomLoading.collectAsState()
+    val dailyRandomError by viewModel.dailyRandomError.collectAsState()
+    val topAnimeSource by viewModel.topAnimeSource.collectAsState()
+    val topAnimeLimit by viewModel.topAnimeLimit.collectAsState()
+    val topAnimeTimeframe by viewModel.topAnimeTimeframe.collectAsState()
+    val topAnimeItems by viewModel.topAnimeItems.collectAsState()
+    val isTopAnimeLoading by viewModel.isTopAnimeLoading.collectAsState()
+    val topAnimeError by viewModel.topAnimeError.collectAsState()
 
-    var activeSection by rememberSaveable { mutableStateOf("feed") } // "feed" | "tagged"
+    val sectionKeys = remember { listOf("feed", "tagged", "random", "top") }
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { sectionKeys.size })
+    val pagerScope = rememberCoroutineScope()
+    val activeSection = sectionKeys[pagerState.currentPage]
     var selectedSentimentKey by rememberSaveable { mutableStateOf<String?>(null) }
     var userFilterOpen by rememberSaveable { mutableStateOf(false) }
     var selectedUserKeys by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
@@ -194,6 +225,22 @@ fun CommunityScreen(
         if (profile != null) {
             viewModel.loadCommunityEmojis()
             viewModel.refreshNotifications(reset = true)
+        }
+    }
+
+    // Automatically load section data whenever user taps or swipes to Tagged You, Random, or Top
+    LaunchedEffect(activeSection) {
+        when (activeSection) {
+            "tagged" -> viewModel.refreshNotifications(reset = true)
+            "random" -> viewModel.loadDailyRandomAnime(forceRefresh = false)
+            "top" -> viewModel.loadTopAnime(forceRefresh = false)
+        }
+    }
+
+    // Keep Top -> Community rankings fresh when community reviews finish loading
+    LaunchedEffect(reviews, topAnimeSource, activeSection) {
+        if (activeSection == "top" && topAnimeSource == com.example.model.TopAnimeSource.COMMUNITY) {
+            viewModel.loadTopAnime(forceRefresh = false)
         }
     }
 
@@ -549,91 +596,222 @@ fun CommunityScreen(
                     }
                 }
 
-                // Dedicated Community Feed vs "Tagged You" Switcher
+                // Slidable Community Catalogue Switcher: Feed | Tagged You | Random | Top
                 val totalUnreadTags = maxOf(
                     unreadNotificationCount,
                     unseenDiscussionAnime.sumOf { it.unseenCount }
                 )
-                Row(
+                val tabScrollState = rememberScrollState()
+                val density = LocalDensity.current
+                val tabOffsetsPx = remember { mutableStateMapOf<Int, Float>() }
+                val tabWidthsPx = remember { mutableStateMapOf<Int, Int>() }
+                val selectedIdx = pagerState.currentPage
+
+                val targetOffsetDp = with(density) { (tabOffsetsPx[selectedIdx] ?: 0f).toDp() }
+                val targetWidthDp = with(density) { (tabWidthsPx[selectedIdx] ?: 0).toDp() }
+
+                val animatedOffsetDp by animateDpAsState(
+                    targetValue = targetOffsetDp,
+                    animationSpec = spring(
+                        dampingRatio = 0.8f,
+                        stiffness = Spring.StiffnessMediumLow
+                    ),
+                    label = "community_tab_indicator_offset"
+                )
+                val animatedWidthDp by animateDpAsState(
+                    targetValue = targetWidthDp,
+                    animationSpec = spring(
+                        dampingRatio = 0.8f,
+                        stiffness = Spring.StiffnessMediumLow
+                    ),
+                    label = "community_tab_indicator_width"
+                )
+                val indicatorBgColor by animateColorAsState(
+                    targetValue = if (selectedIdx == 3) Color(0xFF332E4D) else colors.accentPrimary.copy(alpha = 0.22f),
+                    animationSpec = tween(220),
+                    label = "community_tab_indicator_bg"
+                )
+                val indicatorBorderColor by animateColorAsState(
+                    targetValue = if (selectedIdx == 3) Color(0xFFA78BFA).copy(alpha = 0.72f) else colors.accentPrimary.copy(alpha = 0.72f),
+                    animationSpec = tween(220),
+                    label = "community_tab_indicator_border"
+                )
+
+                // Auto-scroll tab bar smoothly to keep selected tab visible
+                LaunchedEffect(selectedIdx, tabOffsetsPx[selectedIdx]) {
+                    val leftPx = tabOffsetsPx[selectedIdx]?.toInt() ?: return@LaunchedEffect
+                    tabScrollState.animateScrollTo((leftPx - 48).coerceAtLeast(0))
+                }
+
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = AppSpacing.md, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = AppSpacing.md, vertical = 6.dp)
                 ) {
-                    val feedActive = activeSection == "feed"
-                    val taggedActive = activeSection == "tagged"
                     Surface(
                         shape = CircleShape,
-                        color = if (feedActive) colors.accentPrimary.copy(alpha = 0.2f) else colors.elevatedSurface.copy(alpha = 0.65f),
-                        border = BorderStroke(
-                            1.dp,
-                            if (feedActive) colors.accentPrimary.copy(alpha = 0.7f) else colors.borderSubtle.copy(alpha = 0.5f)
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 40.dp)
-                            .clip(CircleShape)
-                            .clickable { activeSection = "feed" }
-                            .testTag("community_tab_feed")
+                        color = colors.elevatedSurface.copy(alpha = 0.65f),
+                        border = BorderStroke(1.dp, colors.borderSubtle.copy(alpha = 0.5f)),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                            Text(
-                                text = "Community Feed",
-                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                color = if (feedActive) colors.highlight else colors.textSecondary
-                            )
-                        }
-                    }
-
-                    Surface(
-                        shape = CircleShape,
-                        color = if (taggedActive) colors.accentPrimary.copy(alpha = 0.2f) else colors.elevatedSurface.copy(alpha = 0.65f),
-                        border = BorderStroke(
-                            1.dp,
-                            if (taggedActive) colors.accentPrimary.copy(alpha = 0.7f)
-                            else if (totalUnreadTags > 0) Color(0xFFEF4444).copy(alpha = 0.55f)
-                            else colors.borderSubtle.copy(alpha = 0.5f)
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 40.dp)
-                            .clip(CircleShape)
-                            .clickable {
-                                activeSection = "tagged"
-                                viewModel.refreshNotifications(reset = true)
-                            }
-                            .testTag("community_tab_tagged_you")
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        Box(
+                            modifier = Modifier
+                                .horizontalScroll(tabScrollState)
+                                .padding(4.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.AlternateEmail,
-                                contentDescription = null,
-                                tint = if (taggedActive) colors.highlight else colors.accentPrimary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = "Tagged You",
-                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                color = if (taggedActive) colors.highlight else colors.textSecondary
-                            )
-                            if (totalUnreadTags > 0) {
-                                Spacer(modifier = Modifier.width(6.dp))
+                            // Smoothly sliding active capsule pill behind tabs
+                            if (targetWidthDp > 0.dp) {
                                 Surface(
                                     shape = CircleShape,
-                                    color = Color(0xFFEF4444),
-                                    modifier = Modifier.testTag("tagged_you_unread_badge")
+                                    color = indicatorBgColor,
+                                    border = BorderStroke(1.dp, indicatorBorderColor),
+                                    modifier = Modifier
+                                        .offset(x = animatedOffsetDp)
+                                        .width(animatedWidthDp)
+                                        .height(38.dp)
+                                ) {}
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 0: Community Feed
+                                val feedActive = selectedIdx == 0
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .height(38.dp)
+                                        .onGloballyPositioned { coords ->
+                                            tabOffsetsPx[0] = coords.positionInParent().x
+                                            tabWidthsPx[0] = coords.size.width
+                                        }
+                                        .clip(CircleShape)
+                                        .clickable {
+                                            pagerScope.launch { pagerState.animateScrollToPage(0) }
+                                        }
+                                        .padding(horizontal = 14.dp)
+                                        .testTag("community_tab_feed")
                                 ) {
                                     Text(
-                                        text = if (totalUnreadTags > 99) "99+" else "$totalUnreadTags",
-                                        style = TabularNumSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                                        color = Color.White,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                        text = "Community Feed",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = if (feedActive) colors.highlight else colors.textSecondary,
+                                        maxLines = 1
+                                    )
+                                }
+
+                                // 1: Tagged You (placed right before Random)
+                                val taggedActive = selectedIdx == 1
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .height(38.dp)
+                                        .onGloballyPositioned { coords ->
+                                            tabOffsetsPx[1] = coords.positionInParent().x
+                                            tabWidthsPx[1] = coords.size.width
+                                        }
+                                        .clip(CircleShape)
+                                        .clickable {
+                                            pagerScope.launch { pagerState.animateScrollToPage(1) }
+                                        }
+                                        .padding(horizontal = 14.dp)
+                                        .testTag("community_tab_tagged_you")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.AlternateEmail,
+                                        contentDescription = null,
+                                        tint = if (taggedActive) colors.highlight else colors.accentPrimary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = "Tagged You",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = if (taggedActive) colors.highlight else colors.textSecondary,
+                                        maxLines = 1
+                                    )
+                                    if (totalUnreadTags > 0) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = Color(0xFFEF4444),
+                                            modifier = Modifier.testTag("tagged_you_unread_badge")
+                                        ) {
+                                            Text(
+                                                text = if (totalUnreadTags > 99) "99+" else "$totalUnreadTags",
+                                                style = TabularNumSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                                                color = Color.White,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // 2: Random
+                                val randomActive = selectedIdx == 2
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .height(38.dp)
+                                        .onGloballyPositioned { coords ->
+                                            tabOffsetsPx[2] = coords.positionInParent().x
+                                            tabWidthsPx[2] = coords.size.width
+                                        }
+                                        .clip(CircleShape)
+                                        .clickable {
+                                            pagerScope.launch { pagerState.animateScrollToPage(2) }
+                                        }
+                                        .padding(horizontal = 14.dp)
+                                        .testTag("community_tab_random")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Casino,
+                                        contentDescription = null,
+                                        tint = if (randomActive) colors.highlight else colors.accentPrimary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = "Random",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = if (randomActive) colors.highlight else colors.textSecondary,
+                                        maxLines = 1
+                                    )
+                                }
+
+                                // 3: Top
+                                val topActive = selectedIdx == 3
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .height(38.dp)
+                                        .onGloballyPositioned { coords ->
+                                            tabOffsetsPx[3] = coords.positionInParent().x
+                                            tabWidthsPx[3] = coords.size.width
+                                        }
+                                        .clip(CircleShape)
+                                        .clickable {
+                                            pagerScope.launch { pagerState.animateScrollToPage(3) }
+                                        }
+                                        .padding(horizontal = 14.dp)
+                                        .testTag("community_tab_top")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.EmojiEvents,
+                                        contentDescription = null,
+                                        tint = if (topActive) Color(0xFFC4B5FD) else Color(0xFFA78BFA),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = "Top",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = if (topActive) Color(0xFFC4B5FD) else colors.textSecondary,
+                                        maxLines = 1
                                     )
                                 }
                             }
@@ -641,34 +819,69 @@ fun CommunityScreen(
                     }
                 }
 
-                if (activeSection == "tagged") {
-                    TaggedYouCommunitySection(
-                        notifications = notifications,
-                        unreadCount = totalUnreadTags,
-                        isLoading = isNotificationsLoading,
-                        hasMore = hasMoreNotifications,
-                        onRefresh = { viewModel.refreshNotifications(reset = true) },
-                        onMarkAllRead = { viewModel.markAllNotificationsRead() },
-                        onLoadMore = { viewModel.loadMoreNotifications() },
-                        onOpenNotification = { n ->
-                            openTaggedAnimeTemplate(
-                                animeId = n.animeId,
-                                animeTitle = n.animeTitle,
-                                animeCoverImage = n.animeCoverImage,
-                                jumpTarget = NotificationJumpTarget(
-                                    animeId = n.animeId,
-                                    commentId = n.commentId,
-                                    threadId = n.threadId,
-                                    replyId = n.replyId
-                                ),
-                                notificationId = n.id
+                // Swipeable HorizontalPager synced seamlessly with the slidable tab bar
+                HorizontalPager(
+                    state = pagerState,
+                    beyondViewportPageCount = 1,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) { page ->
+                    when (page) {
+                        1 -> {
+                            TaggedYouCommunitySection(
+                                notifications = notifications,
+                                unreadCount = totalUnreadTags,
+                                isLoading = isNotificationsLoading,
+                                hasMore = hasMoreNotifications,
+                                onRefresh = { viewModel.refreshNotifications(reset = true) },
+                                onMarkAllRead = { viewModel.markAllNotificationsRead() },
+                                onLoadMore = { viewModel.loadMoreNotifications() },
+                                onOpenNotification = { n ->
+                                    openTaggedAnimeTemplate(
+                                        animeId = n.animeId,
+                                        animeTitle = n.animeTitle,
+                                        animeCoverImage = n.animeCoverImage,
+                                        jumpTarget = NotificationJumpTarget(
+                                            animeId = n.animeId,
+                                            commentId = n.commentId,
+                                            threadId = n.threadId,
+                                            replyId = n.replyId
+                                        ),
+                                        notificationId = n.id
+                                    )
+                                },
+                                modifier = Modifier.fillMaxSize()
                             )
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                    )
-                } else {
+                        }
+                        2 -> {
+                            RandomAnimeOfTheDaySection(
+                                pick = dailyRandomAnime,
+                                isLoading = isDailyRandomLoading,
+                                error = dailyRandomError,
+                                onRetry = { viewModel.loadDailyRandomAnime(forceRefresh = true) },
+                                onSelectAnime = onSelectAnime,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        3 -> {
+                            TopAnimeCommunitySection(
+                                source = topAnimeSource,
+                                limit = topAnimeLimit,
+                                timeframe = topAnimeTimeframe,
+                                items = topAnimeItems,
+                                isLoading = isTopAnimeLoading,
+                                error = topAnimeError,
+                                onSelectSource = { viewModel.setTopAnimeSource(it) },
+                                onSelectLimit = { viewModel.setTopAnimeLimit(it) },
+                                onSelectTimeframe = { viewModel.setTopAnimeTimeframe(it) },
+                                onRetry = { viewModel.loadTopAnime(forceRefresh = true) },
+                                onSelectAnime = onSelectAnime,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        else -> {
+                            Column(modifier = Modifier.fillMaxSize()) {
                     // Sentiment Filter Pills
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = AppSpacing.md, vertical = 6.dp),
@@ -1147,6 +1360,9 @@ fun CommunityScreen(
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
                             }
                         }
                     }

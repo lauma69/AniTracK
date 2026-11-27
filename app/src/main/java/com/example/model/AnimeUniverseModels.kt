@@ -789,3 +789,181 @@ object StarRatingUtils {
         return "%.1f".format(java.util.Locale.US, clamped)
     }
 }
+
+enum class TopAnimeSource(val key: String, val label: String) {
+    COMMUNITY("community", "Community"),
+    ALL("all", "All")
+}
+
+enum class TopAnimeTimeframe(val key: String, val label: String) {
+    WEEKLY("weekly", "Weekly"),
+    MONTHLY("monthly", "Monthly"),
+    SEASONAL("seasonal", "Seasonal"),
+    YEARLY("yearly", "Yearly"),
+    ALL_TIME("all_time", "All Time")
+}
+
+data class TopAnimeRankedItem(
+    val animeId: Int,
+    val title: String,
+    val coverImage: String,
+    val scoreDisplay: String,
+    val voteCount: Int? = null,
+    val formatLabel: String = "",
+    val releaseYear: Int? = null,
+    val episodes: Int? = null,
+    val genres: List<String> = emptyList()
+)
+
+data class DailyAnimePick(
+    val id: String = "",
+    val selectionDate: String = "",
+    val anilistId: Int = 0,
+    val title: String = "",
+    val secondaryTitle: String = "",
+    val rating100: Int? = null,
+    val coverImage: String = "",
+    val bannerImage: String? = null,
+    val trailerId: String? = null,
+    val episodes: Int? = null,
+    val startDate: String? = null,
+    val endDate: String? = null,
+    val rawStatus: String? = null,
+    val rawFormat: String? = null,
+    val rawSeason: String? = null,
+    val releaseYear: Int? = null,
+    val durationMinutes: Int? = null,
+    val rawSource: String? = null,
+    val studios: List<String> = emptyList(),
+    val countryOfOrigin: String? = null,
+    val genres: List<String> = emptyList(),
+    val description: String = ""
+) {
+    val rating10Text: String
+        get() = if (rating100 != null && rating100 > 0) {
+            "%.1f / 10".format(java.util.Locale.US, rating100 / 10.0)
+        } else {
+            "Unknown"
+        }
+
+    val statusLabel: String
+        get() = DailyAnimeFormatters.formatAiringStatus(rawStatus)
+
+    val formatLabel: String
+        get() = DailyAnimeFormatters.formatFormat(rawFormat)
+
+    val seasonLabel: String
+        get() = DailyAnimeFormatters.formatSeason(rawSeason)
+
+    val sourceLabel: String
+        get() = DailyAnimeFormatters.formatSource(rawSource)
+
+    val startDateLabel: String
+        get() = DailyAnimeFormatters.formatIsoDate(startDate)
+
+    val endDateLabel: String
+        get() = DailyAnimeFormatters.formatIsoDate(endDate)
+
+    val selectionDateLabel: String
+        get() = DailyAnimeFormatters.formatIsoDate(selectionDate)
+
+    val episodesLabel: String
+        get() = if (episodes != null && episodes > 0) episodes.toString() else "Unknown"
+
+    val releaseYearLabel: String
+        get() = if (releaseYear != null && releaseYear > 0) releaseYear.toString() else "Unknown"
+
+    val durationLabel: String
+        get() = if (durationMinutes != null && durationMinutes > 0) "$durationMinutes min" else "Unknown"
+
+    val studiosLabel: String
+        get() = if (studios.isNotEmpty()) studios.joinToString(", ") else "Unknown"
+
+    val countryLabel: String
+        get() = countryOfOrigin?.trim()?.takeIf { it.isNotBlank() } ?: "Unknown"
+
+    val validTrailerId: String?
+        get() = trailerId?.trim()?.takeIf { DailyAnimeFormatters.isValidYouTubeId(it) }
+}
+
+object DailyAnimeFormatters {
+    private val YT_ID_REGEX = Regex("^[A-Za-z0-9_-]{11}$")
+    private val MONTHS = arrayOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+    fun isValidYouTubeId(id: String?): Boolean {
+        return !id.isNullOrBlank() && YT_ID_REGEX.matches(id.trim())
+    }
+
+    fun formatAiringStatus(status: String?): String = when (status?.trim()?.uppercase()) {
+        "RELEASING" -> "Currently airing"
+        "FINISHED" -> "Finished airing"
+        "NOT_YET_RELEASED" -> "Upcoming"
+        "CANCELLED" -> "Cancelled"
+        else -> "Unknown"
+    }
+
+    fun formatFormat(format: String?): String = when (format?.trim()?.uppercase()) {
+        "TV" -> "TV"
+        "TV_SHORT" -> "TV Short"
+        "MOVIE" -> "Movie"
+        "OVA" -> "OVA"
+        "ONA" -> "ONA"
+        "SPECIAL" -> "Special"
+        "MUSIC" -> "Music"
+        else -> "Unknown"
+    }
+
+    fun formatSeason(season: String?): String = when (season?.trim()?.uppercase()) {
+        "WINTER" -> "Winter"
+        "SPRING" -> "Spring"
+        "SUMMER" -> "Summer"
+        "FALL" -> "Fall"
+        else -> "Unknown"
+    }
+
+    fun formatSource(source: String?): String = when (source?.trim()?.uppercase()) {
+        "ORIGINAL" -> "Original"
+        "MANGA" -> "Manga"
+        "LIGHT_NOVEL" -> "Light Novel"
+        "VISUAL_NOVEL" -> "Visual Novel"
+        "VIDEO_GAME" -> "Video Game"
+        "WEB_NOVEL" -> "Web Novel"
+        "NOVEL" -> "Novel"
+        "DOUJINSHI" -> "Doujinshi"
+        "ANIME" -> "Anime"
+        "COMIC" -> "Comic"
+        "GAME" -> "Game"
+        "OTHER" -> "Other"
+        else -> "Unknown"
+    }
+
+    fun formatIsoDate(raw: String?): String {
+        val cleaned = raw?.trim().orEmpty()
+        if (cleaned.isBlank()) return "Unknown"
+        val parts = cleaned.split("-").mapNotNull { it.toIntOrNull() }
+        if (parts.isEmpty() || parts[0] <= 0) return "Unknown"
+        return when {
+            parts.size >= 3 && parts[1] in 1..12 && parts[2] in 1..31 ->
+                "${MONTHS[parts[1] - 1]} ${parts[2]}, ${parts[0]}"
+            parts.size >= 2 && parts[1] in 1..12 ->
+                "${MONTHS[parts[1] - 1]} ${parts[0]}"
+            else -> parts[0].toString()
+        }
+    }
+
+    fun stripHtml(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        return raw
+            .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("</?[^>]+(>|$)"), "")
+            .replace("&quot;", "\"")
+            .replace("&#039;", "'")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
+    }
+}
+

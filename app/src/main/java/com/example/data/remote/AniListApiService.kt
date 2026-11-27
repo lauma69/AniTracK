@@ -923,4 +923,65 @@ $aliasBlocks            }
           }
         }
     """.trimIndent()
+
+    fun buildTopRankingsQuery(
+        hasSeason: Boolean,
+        hasSeasonYear: Boolean,
+        hasStartDateGreater: Boolean
+    ): String {
+        val varDefs = mutableListOf(
+            "${'$'}page: Int!",
+            "${'$'}perPage: Int!",
+            "${'$'}sort: [MediaSort]"
+        )
+        val filterArgs = mutableListOf(
+            "type: ANIME",
+            "isAdult: false",
+            "sort: ${'$'}sort",
+            "averageScore_greater: 1"
+        )
+        if (hasSeason) {
+            varDefs.add("${'$'}season: MediaSeason")
+            filterArgs.add("season: ${'$'}season")
+        }
+        if (hasSeasonYear) {
+            varDefs.add("${'$'}seasonYear: Int")
+            filterArgs.add("seasonYear: ${'$'}seasonYear")
+        }
+        if (hasStartDateGreater) {
+            varDefs.add("${'$'}startDateGreater: FuzzyDateInt")
+            filterArgs.add("startDate_greater: ${'$'}startDateGreater")
+        }
+        return """
+            query (${varDefs.joinToString(", ")}) {
+              Page(page: ${'$'}page, perPage: ${'$'}perPage) {
+                pageInfo {
+                  hasNextPage
+                }
+                media(${filterArgs.joinToString(", ")}) {
+                  id
+                  title {
+                    english
+                    romaji
+                    userPreferred
+                  }
+                  coverImage {
+                    large
+                    extraLarge
+                  }
+                  averageScore
+                  format
+                  episodes
+                  seasonYear
+                  startDate {
+                    year
+                  }
+                  genres
+                  countryOfOrigin
+                  synonyms
+                }
+              }
+            }
+        """.trimIndent()
+    }
 }

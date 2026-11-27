@@ -840,8 +840,25 @@ const state = {
 
   // Community State
   communityReviews: [],
-  communityViewTab: 'feed', // 'feed' | 'tagged'
+  communityViewTab: 'feed', // 'feed' | 'random' | 'top' | 'tagged'
   communitySentimentFilter: null,
+  dailyRandom: {
+    loading: false,
+    error: '',
+    data: null,
+    fetchedDate: '',
+    detailsExpanded: false,
+    trailerPlaying: false
+  },
+  topAnime: {
+    source: 'all', // 'community' | 'all'
+    limit: 10, // 10 | 25 | 50 | 100
+    timeframe: 'all_time', // 'weekly' | 'monthly' | 'seasonal' | 'yearly' | 'all_time'
+    loading: false,
+    error: '',
+    items: [],
+    cacheKey: ''
+  },
   communitySort: 'RECENT',
   communityUserFilterOpen: false,
   communitySelectedUsers: [], // up to 3 users: [{ key, userId, username, avatarKey }]
@@ -3707,6 +3724,1316 @@ async function fetchAniListSeasonBatch(ids) {
     }
   }
   return [...cached, ...fetched];
+}
+
+// ============================================================================
+// COMMUNITY — RANDOM ANIME OF THE DAY & TOP ANIME CATALOGUE
+// ============================================================================
+
+const DAILY_RANDOM_CACHE_KEY = 'au_daily_random_anime_v1';
+const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+const topAnimeCatalogCache = new Map();
+
+function getUtcDateKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function isValidYouTubeVideoId(id) {
+  return typeof id === 'string' && YOUTUBE_VIDEO_ID_RE.test(id.trim());
+}
+
+function formatAiringStatusLabel(status) {
+  switch (String(status || '').toUpperCase().trim()) {
+    case 'RELEASING':
+      return 'Currently airing';
+    case 'FINISHED':
+      return 'Finished airing';
+    case 'NOT_YET_RELEASED':
+      return 'Upcoming';
+    case 'CANCELLED':
+      return 'Cancelled';
+    default:
+      return 'Unknown';
+  }
+}
+
+function formatAnimeFormatLabel(format) {
+  switch (String(format || '').toUpperCase().trim()) {
+    case 'TV':
+      return 'TV';
+    case 'TV_SHORT':
+      return 'TV Short';
+    case 'MOVIE':
+      return 'Movie';
+    case 'OVA':
+      return 'OVA';
+    case 'ONA':
+      return 'ONA';
+    case 'SPECIAL':
+      return 'Special';
+    case 'MUSIC':
+      return 'Music';
+    default:
+      return 'Unknown';
+  }
+}
+
+function formatAnimeSourceLabel(source) {
+  switch (String(source || '').toUpperCase().trim()) {
+    case 'ORIGINAL':
+      return 'Original';
+    case 'MANGA':
+      return 'Manga';
+    case 'LIGHT_NOVEL':
+      return 'Light Novel';
+    case 'VISUAL_NOVEL':
+      return 'Visual Novel';
+    case 'VIDEO_GAME':
+      return 'Video Game';
+    case 'WEB_NOVEL':
+      return 'Web Novel';
+    case 'NOVEL':
+      return 'Novel';
+    case 'DOUJINSHI':
+      return 'Doujinshi';
+    case 'ANIME':
+      return 'Anime';
+    case 'COMIC':
+      return 'Comic';
+    case 'GAME':
+      return 'Game';
+    case 'OTHER':
+      return 'Other';
+    default:
+      return 'Unknown';
+  }
+}
+
+function formatAnimeSeasonLabel(season) {
+  switch (String(season || '').toUpperCase().trim()) {
+    case 'WINTER':
+      return 'Winter';
+    case 'SPRING':
+      return 'Spring';
+    case 'SUMMER':
+      return 'Summer';
+    case 'FALL':
+      return 'Fall';
+    default:
+      return 'Unknown';
+  }
+}
+
+function formatIsoDateReadable(rawDate) {
+  if (!rawDate || typeof rawDate !== 'string') return 'Unknown';
+  const trimmed = rawDate.trim();
+  if (!trimmed) return 'Unknown';
+  const parts = trimmed.split('-').map((p) => Number(p));
+  if (!parts[0] || !Number.isFinite(parts[0])) return 'Unknown';
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  if (parts.length >= 3 && parts[1] >= 1 && parts[1] <= 12 && parts[2] >= 1 && parts[2] <= 31) {
+    return `${months[parts[1] - 1]} ${parts[2]}, ${parts[0]}`;
+  }
+  if (parts.length >= 2 && parts[1] >= 1 && parts[1] <= 12) {
+    return `${months[parts[1] - 1]} ${parts[0]}`;
+  }
+  return String(parts[0]);
+}
+
+function stripAnimeHtml(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?[^>]+(>|$)/g, '')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;|&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function normalizeDailyAnimeRow(row) {
+  if (!row || typeof row !== 'object') return null;
+  const meta = row.anime_metadata && typeof row.anime_metadata === 'object' ? row.anime_metadata : {};
+  const ratingInt = Number(row.rating ?? meta.average_score ?? 0);
+  const trailerId = String(row.trailer_id || meta?.trailer?.id || '').trim();
+  const studiosRaw = Array.isArray(meta.studios) ? meta.studios.filter(Boolean) : [];
+  const genresRaw = Array.isArray(meta.genres) ? meta.genres.filter(Boolean) : [];
+  const titleObj = meta.title && typeof meta.title === 'object' ? meta.title : {};
+  const displayTitle =
+    String(row.title || titleObj.english || titleObj.romaji || titleObj.native || '').trim() || 'Unknown';
+  const secondaryTitle =
+    titleObj.romaji && titleObj.romaji !== displayTitle
+      ? titleObj.romaji
+      : titleObj.native && titleObj.native !== displayTitle
+      ? titleObj.native
+      : '';
+
+  return {
+    id: row.id || '',
+    selectionDate: String(row.selection_date || ''),
+    anilistId: Number(row.anilist_id || meta.anilist_id || 0),
+    title: displayTitle,
+    secondaryTitle: String(secondaryTitle || '').trim(),
+    rating100: Number.isFinite(ratingInt) && ratingInt > 0 ? ratingInt : null,
+    rating10: Number.isFinite(ratingInt) && ratingInt > 0 ? (ratingInt / 10).toFixed(1) : null,
+    coverImage: String(row.cover_image || meta.cover_image || '').trim(),
+    bannerImage: String(row.banner_image || meta.banner_image || '').trim(),
+    trailerId: isValidYouTubeVideoId(trailerId) ? trailerId : '',
+    episodes: typeof meta.episodes === 'number' && meta.episodes > 0 ? meta.episodes : null,
+    startDate: formatIsoDateReadable(meta.start_date),
+    endDate: formatIsoDateReadable(meta.end_date),
+    statusLabel: formatAiringStatusLabel(meta.status),
+    rawStatus: String(meta.status || '').toUpperCase(),
+    formatLabel: formatAnimeFormatLabel(meta.format),
+    seasonLabel: formatAnimeSeasonLabel(meta.season),
+    releaseYear: meta.season_year ? String(meta.season_year) : 'Unknown',
+    durationLabel: typeof meta.duration === 'number' && meta.duration > 0 ? `${meta.duration} min` : 'Unknown',
+    sourceLabel: formatAnimeSourceLabel(meta.source),
+    studiosLabel: studiosRaw.length > 0 ? studiosRaw.join(', ') : 'Unknown',
+    countryLabel: meta.country_of_origin ? String(meta.country_of_origin) : 'Unknown',
+    genres: genresRaw,
+    description: stripAnimeHtml(meta.description || '')
+  };
+}
+
+let lastCommunityTabRect = null;
+let lastCommunitySlideDir = 0;
+let lastTopSourceSlideFrom = null;
+const COMMUNITY_TAB_ORDER = ['feed', 'tagged', 'random', 'top'];
+
+function switchCommunityViewTab(rawNext) {
+  const next = COMMUNITY_TAB_ORDER.includes(rawNext) ? rawNext : 'feed';
+  const prev = COMMUNITY_TAB_ORDER.includes(state.communityViewTab) ? state.communityViewTab : 'feed';
+  if (next === prev) {
+    if (next === 'random' && !state.dailyRandom.data && !state.dailyRandom.loading) {
+      loadDailyRandomAnime(false);
+    } else if (next === 'top' && state.topAnime.items.length === 0 && !state.topAnime.loading) {
+      loadTopAnimeCatalog(false);
+    }
+    return;
+  }
+  const activeEl = document.querySelector('.community-view-switcher .community-view-tab.active');
+  if (activeEl) {
+    lastCommunityTabRect = {
+      left: activeEl.offsetLeft,
+      width: activeEl.offsetWidth
+    };
+  }
+  const prevIdx = COMMUNITY_TAB_ORDER.indexOf(prev);
+  const nextIdx = COMMUNITY_TAB_ORDER.indexOf(next);
+  lastCommunitySlideDir = nextIdx > prevIdx ? 1 : -1;
+  state.communityViewTab = next;
+  renderApp();
+  if (next === 'tagged' && state.session) {
+    loadUserNotifications(true);
+  } else if (next === 'random') {
+    loadDailyRandomAnime(false);
+  } else if (next === 'top') {
+    loadTopAnimeCatalog(false);
+  }
+}
+
+function switchTopAnimeSource(rawSrc) {
+  const nextSrc = rawSrc === 'community' ? 'community' : 'all';
+  if (state.topAnime.source === nextSrc) return;
+  lastTopSourceSlideFrom = state.topAnime.source;
+  state.topAnime.source = nextSrc;
+  loadTopAnimeCatalog(false);
+}
+
+function createDailyUtcPrng(seedKey) {
+  let stateVal = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < seedKey.length; i++) {
+    stateVal = Math.imul(stateVal ^ seedKey.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return {
+    nextUInt() {
+      stateVal = (stateVal + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(stateVal ^ (stateVal >>> 15), (1 | stateVal) >>> 0) >>> 0;
+      t = ((t + Math.imul(t ^ (t >>> 7), (61 | t) >>> 0)) ^ t) >>> 0;
+      return (t ^ (t >>> 14)) >>> 0;
+    },
+    nextInt(bound) {
+      if (bound <= 1) return 0;
+      return this.nextUInt() % bound;
+    }
+  };
+}
+
+function formatFuzzyDateNode(obj) {
+  if (!obj || !obj.year) return null;
+  const y = String(obj.year).padStart(4, '0');
+  if (obj.month && obj.day) {
+    return `${y}-${String(obj.month).padStart(2, '0')}-${String(obj.day).padStart(2, '0')}`;
+  }
+  if (obj.month) {
+    return `${y}-${String(obj.month).padStart(2, '0')}`;
+  }
+  return y;
+}
+
+async function isYouTubeTrailerEmbeddableWeb(videoId) {
+  if (!isValidYouTubeId(videoId)) return false;
+  try {
+    const resp = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}&format=json`,
+      { method: 'GET' }
+    );
+    return resp.ok;
+  } catch (_) {
+    // Some browsers block CORS on youtube.com/oembed; fall back to high-res thumbnail probe
+    try {
+      const thumb = await fetch(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`, { method: 'HEAD' });
+      return thumb.ok;
+    } catch (__) {
+      return true;
+    }
+  }
+}
+
+async function pickAutomaticDailyAnimeRowWeb(todayUtc, excludedIds) {
+  const prng = createDailyUtcPrng(`anime-universe-daily-pick-v1:${todayUtc}`);
+  const pagePool = Array.from({ length: 32 }, (_, i) => i + 1);
+  for (let i = pagePool.length - 1; i >= 1; i--) {
+    const j = prng.nextInt(i + 1);
+    const tmp = pagePool[i];
+    pagePool[i] = pagePool[j];
+    pagePool[j] = tmp;
+  }
+
+  const query = `
+query ($page: Int!, $perPage: Int!) {
+  Page(page: $page, perPage: $perPage) {
+    media(
+      type: ANIME,
+      isAdult: false,
+      averageScore_greater: 59,
+      status_in: [FINISHED, RELEASING],
+      sort: [POPULARITY_DESC]
+    ) {
+      id
+      title { english romaji native }
+      coverImage { extraLarge large color }
+      bannerImage
+      averageScore
+      episodes
+      startDate { year month day }
+      endDate { year month day }
+      status
+      format
+      season
+      seasonYear
+      genres
+      description(asHtml: false)
+      duration
+      source
+      countryOfOrigin
+      studios(isMain: true) { nodes { name } }
+      trailer { id site thumbnail }
+    }
+  }
+}
+`;
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const page = pagePool[attempt % pagePool.length];
+    let mediaList = [];
+    try {
+      const resp = await fetch('https://graphql.anilist.co', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query, variables: { page, perPage: 50 } })
+      });
+      if (!resp.ok) continue;
+      const json = await resp.json();
+      mediaList = Array.isArray(json?.data?.Page?.media) ? json.data.Page.media : [];
+    } catch (_) {
+      continue;
+    }
+
+    const candidates = mediaList.filter((m) => {
+      const id = Number(m?.id || 0);
+      const score = Number(m?.averageScore || 0);
+      if (!id || excludedIds.has(id) || score < 60 || score > 100) return false;
+      const title = m?.title?.english || m?.title?.romaji || m?.title?.native || '';
+      const cover = m?.coverImage?.extraLarge || m?.coverImage?.large || '';
+      const site = String(m?.trailer?.site || '').toLowerCase();
+      const tid = String(m?.trailer?.id || '').trim();
+      return Boolean(title && cover && site === 'youtube' && isValidYouTubeId(tid));
+    });
+
+    for (let i = candidates.length - 1; i >= 1; i--) {
+      const j = prng.nextInt(i + 1);
+      const tmp = candidates[i];
+      candidates[i] = candidates[j];
+      candidates[j] = tmp;
+    }
+
+    let checked = 0;
+    for (const m of candidates) {
+      if (checked >= 8) break;
+      checked++;
+      const trailerId = String(m.trailer.id).trim();
+      const ok = await isYouTubeTrailerEmbeddableWeb(trailerId);
+      if (!ok) continue;
+
+      const id = Number(m.id);
+      const score = Number(m.averageScore);
+      const english = m?.title?.english || null;
+      const romaji = m?.title?.romaji || null;
+      const nativeTitle = m?.title?.native || null;
+      const displayTitle = english || romaji || nativeTitle || 'Unknown';
+      const coverImage = m?.coverImage?.extraLarge || m?.coverImage?.large || '';
+      const bannerImage = m?.bannerImage || null;
+      const studios = Array.isArray(m?.studios?.nodes)
+        ? m.studios.nodes.map((s) => String(s?.name || '').trim()).filter(Boolean)
+        : [];
+      const startDateStr = formatFuzzyDateNode(m?.startDate);
+      const endDateStr = formatFuzzyDateNode(m?.endDate);
+      const seasonYear = m?.seasonYear || m?.startDate?.year || null;
+
+      return {
+        id: `auto-${todayUtc}-${id}`,
+        selection_date: todayUtc,
+        anilist_id: id,
+        title: displayTitle,
+        rating: score,
+        cover_image: coverImage,
+        banner_image: bannerImage,
+        trailer_id: trailerId,
+        anime_metadata: {
+          anilist_id: id,
+          title: { english, romaji, native: nativeTitle },
+          cover_image: coverImage,
+          banner_image: bannerImage,
+          average_score: score,
+          episodes: m?.episodes ?? null,
+          start_date: startDateStr,
+          end_date: endDateStr,
+          status: m?.status || null,
+          format: m?.format || null,
+          season: m?.season || null,
+          season_year: seasonYear,
+          genres: Array.isArray(m?.genres) ? m.genres : [],
+          description: m?.description || '',
+          duration: m?.duration ?? null,
+          source: m?.source || null,
+          country_of_origin: m?.countryOfOrigin || null,
+          studios,
+          trailer: { id: trailerId, site: 'youtube' }
+        }
+      };
+    }
+  }
+  return null;
+}
+
+async function loadDailyRandomAnime(forceRefresh = false) {
+  const todayUtc = getUtcDateKey();
+  const dr = state.dailyRandom;
+
+  if (!forceRefresh && dr.data && dr.fetchedDate === todayUtc && dr.data.selectionDate === todayUtc) {
+    return;
+  }
+
+  if (!forceRefresh) {
+    try {
+      const cachedRaw = localStorage.getItem(DAILY_RANDOM_CACHE_KEY);
+      if (cachedRaw) {
+        const cached = JSON.parse(cachedRaw);
+        if (
+          cached &&
+          cached.cachedDate === todayUtc &&
+          cached.row &&
+          cached.row.anilist_id &&
+          String(cached.row.selection_date || '') === todayUtc
+        ) {
+          dr.data = normalizeDailyAnimeRow(cached.row);
+          dr.fetchedDate = todayUtc;
+          dr.error = '';
+          dr.loading = false;
+          if (state.tab === 'community' && state.communityViewTab === 'random') {
+            renderApp();
+          }
+          return;
+        }
+      }
+    } catch (_) {}
+  }
+
+  dr.loading = true;
+  dr.error = '';
+  dr.trailerPlaying = false;
+  if (state.tab === 'community' && state.communityViewTab === 'random') {
+    renderApp();
+  }
+
+  try {
+    const baseUrl = getVaultBaseUrl();
+    const apiKey = getVaultPublicKey();
+    const headers = {
+      apikey: apiKey,
+      Accept: 'application/json'
+    };
+    if (state.session?.accessToken) {
+      headers.Authorization = `Bearer ${state.session.accessToken}`;
+    }
+
+    let row = null;
+    const excludedIds = new Set();
+
+    // Stage 1: Read canonical row from Supabase public.daily_anime
+    try {
+      const resp = await fetch(`${baseUrl}/rest/v1/daily_anime?select=*&order=selection_date.desc&limit=1`, {
+        method: 'GET',
+        headers
+      });
+      if (resp.ok) {
+        const rows = await resp.json().catch(() => []);
+        if (Array.isArray(rows) && rows.length > 0) {
+          row = rows[0];
+        }
+      }
+    } catch (_) {}
+
+    // Stage 2: If today's UTC pick isn't stored yet, try Edge Function if deployed
+    if ((!row || String(row.selection_date || '') !== todayUtc) && state.session?.accessToken) {
+      try {
+        const fnResp = await fetch(`${baseUrl}/functions/v1/daily-random-anime`, {
+          method: 'POST',
+          headers: {
+            apikey: apiKey,
+            Authorization: `Bearer ${state.session.accessToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          },
+          body: JSON.stringify({ source: 'client_ensure_today' })
+        });
+        if (fnResp.ok) {
+          const fnJson = await fnResp.json().catch(() => null);
+          const candidate = fnJson?.data || fnJson?.anime || null;
+          if (candidate && candidate.anilist_id) {
+            row = candidate;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Stage 3: Complete automatic daily selector (deterministic UTC-date seed + AniList + YouTube check)
+    if (!row || String(row.selection_date || '') !== todayUtc) {
+      try {
+        const rpcIdsResp = await fetch(`${baseUrl}/rest/v1/rpc/get_featured_anime_ids`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: '{}'
+        });
+        if (rpcIdsResp.ok) {
+          const idsArr = await rpcIdsResp.json().catch(() => []);
+          if (Array.isArray(idsArr)) {
+            idsArr.forEach((id) => {
+              const n = Number(id);
+              if (n > 0) excludedIds.add(n);
+            });
+          }
+        }
+      } catch (_) {}
+
+      if (excludedIds.size === 0) {
+        try {
+          const histResp = await fetch(`${baseUrl}/rest/v1/daily_anime?select=anilist_id&limit=1000`, {
+            method: 'GET',
+            headers
+          });
+          if (histResp.ok) {
+            const histRows = await histResp.json().catch(() => []);
+            if (Array.isArray(histRows)) {
+              histRows.forEach((r) => {
+                const n = Number(r?.anilist_id || 0);
+                if (n > 0) excludedIds.add(n);
+              });
+            }
+          }
+        } catch (_) {}
+      }
+
+      const autoRow = await pickAutomaticDailyAnimeRowWeb(todayUtc, excludedIds);
+      if (autoRow) {
+        row = autoRow;
+        // Stage 4: Atomically persist into Supabase via claim_daily_anime_selection RPC (if available & authenticated)
+        if (state.session?.accessToken) {
+          try {
+            const claimResp = await fetch(`${baseUrl}/rest/v1/rpc/claim_daily_anime_selection`, {
+              method: 'POST',
+              headers: {
+                apikey: apiKey,
+                Authorization: `Bearer ${state.session.accessToken}`,
+                'Content-Type': 'application/json',
+                Accept: 'application/json'
+              },
+              body: JSON.stringify({
+                p_anilist_id: autoRow.anilist_id,
+                p_title: autoRow.title,
+                p_rating: autoRow.rating,
+                p_cover_image: autoRow.cover_image,
+                p_banner_image: autoRow.banner_image,
+                p_trailer_id: autoRow.trailer_id,
+                p_anime_metadata: autoRow.anime_metadata
+              })
+            });
+            if (claimResp.ok) {
+              const claimJson = await claimResp.json().catch(() => null);
+              const claimed = Array.isArray(claimJson) ? claimJson[0] : claimJson;
+              if (claimed && claimed.anilist_id) {
+                row = claimed;
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    if (!row) {
+      dr.data = null;
+      dr.fetchedDate = todayUtc;
+      dr.error = 'Unable to load today’s featured anime right now. Please try again.';
+    } else {
+      dr.data = normalizeDailyAnimeRow(row);
+      dr.fetchedDate = todayUtc;
+      dr.error = '';
+      try {
+        localStorage.setItem(
+          DAILY_RANDOM_CACHE_KEY,
+          JSON.stringify({ cachedDate: todayUtc, row })
+        );
+      } catch (_) {}
+    }
+  } catch (err) {
+    dr.error = err?.message || 'Could not load today’s anime pick. Please try again.';
+  } finally {
+    dr.loading = false;
+    if (state.tab === 'community' && state.communityViewTab === 'random') {
+      renderApp();
+    }
+  }
+}
+
+function getCurrentAnimeSeasonAndYear() {
+  const now = new Date();
+  const month = now.getUTCMonth() + 1;
+  const year = now.getUTCFullYear();
+  let season = 'WINTER';
+  if (month >= 4 && month <= 6) season = 'SPRING';
+  else if (month >= 7 && month <= 9) season = 'SUMMER';
+  else if (month >= 10) season = 'FALL';
+  return { season, year };
+}
+
+function getFuzzyDateMonthsAgo(monthsAgo) {
+  const d = new Date();
+  d.setUTCMonth(d.getUTCMonth() - monthsAgo);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return Number(`${y}${m}${day}`);
+}
+
+function computeCommunityTopAnime(timeframe, limit) {
+  const nowMs = Date.now();
+  const cutoffDays =
+    timeframe === 'weekly'
+      ? 7
+      : timeframe === 'monthly'
+      ? 30
+      : timeframe === 'seasonal'
+      ? 90
+      : timeframe === 'yearly'
+      ? 365
+      : null;
+  const cutoffMs = cutoffDays ? nowMs - cutoffDays * 86400000 : 0;
+
+  const byAnime = new Map();
+  for (const rev of state.communityReviews || []) {
+    const rating10 = Number(rev.rating ?? rev.personal_rating ?? 0);
+    if (!Number.isFinite(rating10) || rating10 <= 0) continue;
+    if (cutoffMs > 0) {
+      const ts = Date.parse(rev.updated_at || rev.created_at || '');
+      if (!Number.isFinite(ts) || ts < cutoffMs) continue;
+    }
+    const aid = Number(rev.anime_id || 0);
+    if (!aid) continue;
+    let bucket = byAnime.get(aid);
+    if (!bucket) {
+      bucket = {
+        animeId: aid,
+        title: rev.anime_title || `Anime #${aid}`,
+        coverImage: rev.anime_cover_image || '',
+        format: rev.anime_format || '',
+        releaseYear: rev.anime_year || null,
+        episodes: rev.anime_episodes || null,
+        genres: Array.isArray(rev.anime_genres) ? rev.anime_genres : [],
+        sumRating10: 0,
+        voteCount: 0
+      };
+      byAnime.set(aid, bucket);
+    }
+    bucket.sumRating10 += rating10;
+    bucket.voteCount += 1;
+  }
+
+  return Array.from(byAnime.values())
+    .map((b) => ({
+      animeId: b.animeId,
+      title: b.title,
+      coverImage: b.coverImage,
+      scoreDisplay: (b.sumRating10 / Math.max(1, b.voteCount) / 2).toFixed(1),
+      scoreScale: '5',
+      voteCount: b.voteCount,
+      format: b.format ? formatAnimeFormatLabel(b.format) : '',
+      releaseYear: b.releaseYear || null,
+      episodes: b.episodes || null,
+      genres: b.genres.slice(0, 3),
+      sortScore: b.sumRating10 / Math.max(1, b.voteCount)
+    }))
+    .sort((a, b) => {
+      if (b.sortScore !== a.sortScore) return b.sortScore - a.sortScore;
+      return b.voteCount - a.voteCount;
+    })
+    .slice(0, limit);
+}
+
+function buildTopAnimeGraphQLQuery({ hasSeason, hasSeasonYear, hasStartDateGreater }) {
+  const varDefs = ['$page: Int!', '$perPage: Int!', '$sort: [MediaSort]'];
+  const mediaArgs = ['type: ANIME', 'isAdult: false', 'sort: $sort', 'averageScore_greater: 1'];
+  if (hasSeason) {
+    varDefs.push('$season: MediaSeason');
+    mediaArgs.push('season: $season');
+  }
+  if (hasSeasonYear) {
+    varDefs.push('$seasonYear: Int');
+    mediaArgs.push('seasonYear: $seasonYear');
+  }
+  if (hasStartDateGreater) {
+    varDefs.push('$startDateGreater: FuzzyDateInt');
+    mediaArgs.push('startDate_greater: $startDateGreater');
+  }
+
+  return `
+query (${varDefs.join(', ')}) {
+  Page(page: $page, perPage: $perPage) {
+    media(${mediaArgs.join(', ')}) {
+      id
+      title {
+        english
+        romaji
+        userPreferred
+      }
+      coverImage {
+        large
+        extraLarge
+      }
+      averageScore
+      format
+      episodes
+      seasonYear
+      startDate {
+        year
+      }
+      genres
+      countryOfOrigin
+      synonyms
+    }
+  }
+}
+`;
+}
+
+async function fetchJikanTopAnimeFallback(page, perPage, timeframe) {
+  const limit = Math.min(25, Math.max(10, Number(perPage) || 25));
+  const url =
+    timeframe === 'seasonal'
+      ? `https://api.jikan.moe/v4/seasons/now?page=${page}&limit=${limit}&sfw=true`
+      : timeframe === 'weekly' || timeframe === 'monthly'
+      ? `https://api.jikan.moe/v4/top/anime?filter=airing&page=${page}&limit=${limit}&sfw=true`
+      : `https://api.jikan.moe/v4/top/anime?page=${page}&limit=${limit}&sfw=true`;
+
+  const resp = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+  if (!resp.ok) return [];
+  const json = await resp.json().catch(() => null);
+  const rows = Array.isArray(json?.data) ? json.data : [];
+  return rows.map((item) => ({
+    id: Number(item?.mal_id || 0),
+    title: {
+      english: item?.title_english || item?.title || '',
+      romaji: item?.title || '',
+      userPreferred: item?.title_english || item?.title || ''
+    },
+    coverImage: {
+      extraLarge: item?.images?.webp?.large_image_url || item?.images?.jpg?.large_image_url || '',
+      large: item?.images?.webp?.image_url || item?.images?.jpg?.image_url || ''
+    },
+    averageScore: item?.score ? Math.round(Number(item.score) * 10) : 0,
+    format: String(item?.type || '').toUpperCase(),
+    episodes: item?.episodes || null,
+    seasonYear: item?.year || item?.aired?.prop?.from?.year || null,
+    startDate: { year: item?.year || item?.aired?.prop?.from?.year || null },
+    genres: Array.isArray(item?.genres) ? item.genres.map((g) => g?.name).filter(Boolean) : [],
+    countryOfOrigin: 'JP',
+    synonyms: Array.isArray(item?.title_synonyms) ? item.title_synonyms : []
+  }));
+}
+
+async function fetchTopAnimeCatalogPage(page, perPage, timeframe) {
+  const { season, year } = getCurrentAnimeSeasonAndYear();
+  const variables = { page, perPage };
+
+  switch (timeframe) {
+    case 'weekly':
+      variables.sort = ['TRENDING_DESC', 'SCORE_DESC'];
+      break;
+    case 'monthly':
+      variables.sort = ['POPULARITY_DESC', 'SCORE_DESC'];
+      variables.startDateGreater = getFuzzyDateMonthsAgo(6);
+      break;
+    case 'seasonal':
+      variables.sort = ['SCORE_DESC', 'POPULARITY_DESC'];
+      variables.season = season;
+      variables.seasonYear = year;
+      break;
+    case 'yearly':
+      variables.sort = ['SCORE_DESC', 'POPULARITY_DESC'];
+      variables.seasonYear = year;
+      break;
+    case 'all_time':
+    default:
+      variables.sort = ['SCORE_DESC', 'POPULARITY_DESC'];
+      break;
+  }
+
+  const query = buildTopAnimeGraphQLQuery({
+    hasSeason: Boolean(variables.season),
+    hasSeasonYear: Boolean(variables.seasonYear),
+    hasStartDateGreater: Boolean(variables.startDateGreater)
+  });
+
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const resp = await fetch('https://graphql.anilist.co', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query, variables })
+      });
+      if (resp.status === 429 && attempt < 2) {
+        const retryAfter = Number(resp.headers.get('Retry-After') || 0);
+        await new Promise((r) => setTimeout(r, retryAfter >= 1 && retryAfter <= 4 ? retryAfter * 1000 : 900 * (attempt + 1)));
+        continue;
+      }
+      if (resp.ok) {
+        const json = await resp.json();
+        const media = Array.isArray(json?.data?.Page?.media) ? json.data.Page.media : [];
+        if (media.length > 0) return media;
+      }
+      break;
+    }
+  } catch (_) {}
+
+  // Reliable fallback if primary catalog API is rate-limited or unreachable
+  const fallback = await fetchJikanTopAnimeFallback(page, perPage, timeframe);
+  if (fallback.length > 0) return fallback;
+  throw new Error('Unable to load top rankings right now.');
+}
+
+async function loadTopAnimeCatalog(forceRefresh = false) {
+  const top = state.topAnime;
+  const cacheKey = `${top.source}|${top.timeframe}|${top.limit}`;
+  top.cacheKey = cacheKey;
+
+  if (top.source === 'community') {
+    top.loading = false;
+    top.error = '';
+    top.items = computeCommunityTopAnime(top.timeframe, top.limit);
+    if (state.tab === 'community' && state.communityViewTab === 'top') {
+      renderApp();
+    }
+    return;
+  }
+
+  if (!forceRefresh && topAnimeCatalogCache.has(cacheKey)) {
+    const hit = topAnimeCatalogCache.get(cacheKey);
+    if (Date.now() - hit.ts < 5 * 60 * 1000) {
+      top.items = hit.items;
+      top.loading = false;
+      top.error = '';
+      if (state.tab === 'community' && state.communityViewTab === 'top') {
+        renderApp();
+      }
+      return;
+    }
+  }
+
+  top.loading = true;
+  top.error = '';
+  if (state.tab === 'community' && state.communityViewTab === 'top') {
+    renderApp();
+  }
+
+  try {
+    const requestedLimit = Number(top.limit) || 10;
+    let rawList = [];
+    if (requestedLimit <= 50) {
+      rawList = await fetchTopAnimeCatalogPage(1, requestedLimit, top.timeframe);
+    } else {
+      const page1 = await fetchTopAnimeCatalogPage(1, 50, top.timeframe);
+      const page2 = await fetchTopAnimeCatalogPage(2, 50, top.timeframe);
+      rawList = [...page1, ...page2];
+    }
+
+    if (state.topAnime.cacheKey !== cacheKey) return;
+
+    const seen = new Set();
+    const mapped = [];
+    for (const node of rawList) {
+      const id = Number(node?.id || 0);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const isDonghua = String(node.countryOfOrigin || '').toUpperCase() === 'CN';
+      const title =
+        resolveEnglishTitle(
+          node?.title?.english || '',
+          node?.title?.romaji || node?.title?.userPreferred || '',
+          node?.synonyms || [],
+          isDonghua
+        ) ||
+        node?.title?.english ||
+        node?.title?.userPreferred ||
+        node?.title?.romaji ||
+        `Anime #${id}`;
+      const avgScore = Number(node?.averageScore || 0);
+      mapped.push({
+        animeId: id,
+        title,
+        coverImage: node?.coverImage?.extraLarge || node?.coverImage?.large || '',
+        scoreDisplay: avgScore > 0 ? (avgScore / 10).toFixed(1) : '—',
+        scoreScale: '10',
+        voteCount: null,
+        format: node?.format ? formatAnimeFormatLabel(node.format) : '',
+        releaseYear: node?.seasonYear || node?.startDate?.year || null,
+        episodes: node?.episodes || null,
+        genres: Array.isArray(node?.genres) ? node.genres.slice(0, 3) : []
+      });
+      if (mapped.length >= requestedLimit) break;
+    }
+
+    topAnimeCatalogCache.set(cacheKey, { ts: Date.now(), items: mapped });
+    top.items = mapped;
+    top.error = '';
+  } catch (err) {
+    if (state.topAnime.cacheKey === cacheKey) {
+      top.error = 'Could not load rankings right now. Please try again.';
+    }
+  } finally {
+    if (state.topAnime.cacheKey === cacheKey) {
+      top.loading = false;
+      if (state.tab === 'community' && state.communityViewTab === 'top') {
+        renderApp();
+      }
+    }
+  }
+}
+
+function renderRandomAnimeSection() {
+  const dr = state.dailyRandom;
+  const pick = dr.data;
+
+  if (dr.loading && !pick) {
+    return `
+      <div class="daily-random-card daily-random-skeleton">
+        <div class="daily-random-header">
+          <div>
+            <div class="skeleton-pill" style="width:110px;height:22px;margin-bottom:10px;"></div>
+            <div class="skeleton-line" style="width:240px;height:28px;"></div>
+          </div>
+        </div>
+        <div class="daily-random-main">
+          <div class="skeleton-poster"></div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:10px;">
+            <div class="skeleton-line" style="width:78%;height:24px;"></div>
+            <div class="skeleton-line" style="width:45%;height:16px;"></div>
+            <div class="skeleton-line" style="width:100%;height:14px;"></div>
+            <div class="skeleton-line" style="width:92%;height:14px;"></div>
+            <div class="skeleton-line" style="width:66%;height:14px;"></div>
+          </div>
+        </div>
+        <div class="skeleton-trailer"></div>
+      </div>
+    `;
+  }
+
+  if (dr.error && !pick) {
+    return `
+      <div class="app-card" style="text-align:center;padding:38px 22px;">
+        <div class="serif-heading" style="font-size:24px;margin-bottom:8px;">Random Anime of the Day</div>
+        <p style="color:var(--text-secondary);font-size:13.5px;margin-bottom:16px;">${escapeHtml(dr.error)}</p>
+        <button type="button" class="btn-primary" id="btn-random-retry">TRY AGAIN</button>
+      </div>
+    `;
+  }
+
+  if (!pick) {
+    return `
+      <div class="app-card" style="text-align:center;padding:40px 22px;">
+        <span class="daily-pick-badge">TODAY’S PICK</span>
+        <div class="serif-heading" style="font-size:26px;margin:10px 0 8px;">Random Anime of the Day</div>
+        <p style="color:var(--text-secondary);font-size:13.5px;max-width:420px;margin:0 auto 16px;">
+          Today’s featured anime selection is being prepared. Check back shortly!
+        </p>
+        <button type="button" class="btn-secondary" id="btn-random-retry">REFRESH</button>
+      </div>
+    `;
+  }
+
+  const shortDesc =
+    pick.description.length > 260 && !dr.detailsExpanded
+      ? `${pick.description.slice(0, 260).trim()}…`
+      : pick.description || 'No description available.';
+  const trailerId = pick.trailerId;
+  const trailerThumb = trailerId ? `https://i.ytimg.com/vi/${trailerId}/hqdefault.jpg` : '';
+  const youtubeWatchUrl = trailerId ? `https://www.youtube.com/watch?v=${trailerId}` : '';
+  const safeOriginParam =
+    typeof window !== 'undefined' && /^https?:\/\//i.test(window.location?.origin || '')
+      ? `&origin=${encodeURIComponent(window.location.origin)}`
+      : '';
+  const youtubeEmbedUrl = trailerId
+    ? `https://www.youtube.com/embed/${trailerId}?autoplay=1&playsinline=1&rel=0&modestbranding=1&enablejsapi=1${safeOriginParam}`
+    : '';
+
+  return `
+    <section class="daily-random-card" aria-label="Random Anime of the Day">
+      ${
+        pick.bannerImage
+          ? `<div class="daily-random-banner" style="background-image:url('${escapeHtml(pick.bannerImage)}');"></div>`
+          : ''
+      }
+      <div class="daily-random-inner">
+        <div class="daily-random-header">
+          <div>
+            <div class="daily-random-badge-row">
+              <span class="daily-pick-badge">★ TODAY’S PICK</span>
+              ${
+                pick.selectionDate
+                  ? `<span class="daily-date-chip">${escapeHtml(formatIsoDateReadable(pick.selectionDate))}</span>`
+                  : ''
+              }
+            </div>
+            <h2 class="serif-heading daily-random-heading">Random Anime of the Day</h2>
+          </div>
+          ${
+            pick.anilistId
+              ? `<button type="button" class="capsule-pill active" data-comm-open-anime="${pick.anilistId}">Open Page</button>`
+              : ''
+          }
+        </div>
+
+        <div class="daily-random-main">
+          <div class="daily-random-poster-wrap" ${pick.anilistId ? `data-comm-open-anime="${pick.anilistId}" style="cursor:pointer;"` : ''}>
+            ${
+              pick.coverImage
+                ? `<img class="daily-random-poster" src="${escapeHtml(pick.coverImage)}" alt="${escapeHtml(pick.title)}" loading="lazy" />`
+                : `<div class="daily-random-poster daily-random-poster-fallback">★</div>`
+            }
+          </div>
+
+          <div class="daily-random-info">
+            <h3 class="daily-random-title">${escapeHtml(pick.title)}</h3>
+            ${
+              pick.secondaryTitle
+                ? `<div class="daily-random-subtitle">${escapeHtml(pick.secondaryTitle)}</div>`
+                : ''
+            }
+
+            <div class="daily-random-stats-row">
+              <span class="daily-rating-pill">★ ${escapeHtml(pick.rating10 ? `${pick.rating10} / 10` : 'Unknown')}</span>
+              <span class="daily-meta-pill">${escapeHtml(pick.formatLabel)}</span>
+              <span class="daily-meta-pill status-${escapeHtml(pick.rawStatus.toLowerCase() || 'unknown')}">${escapeHtml(pick.statusLabel)}</span>
+            </div>
+
+            ${
+              pick.genres.length > 0
+                ? `<div class="daily-genre-row">
+                    ${pick.genres.map((g) => `<span class="daily-genre-chip">${escapeHtml(g)}</span>`).join('')}
+                  </div>`
+                : ''
+            }
+
+            <p class="daily-random-description">${escapeHtml(shortDesc)}</p>
+
+            <div class="daily-random-actions">
+              <button type="button" class="daily-details-toggle" id="btn-random-toggle-details" aria-expanded="${dr.detailsExpanded ? 'true' : 'false'}">
+                <span>${dr.detailsExpanded ? 'Hide Details' : 'View Details'}</span>
+                <span class="daily-chevron ${dr.detailsExpanded ? 'open' : ''}">▾</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        ${
+          dr.detailsExpanded
+            ? `
+              <div class="daily-details-grid">
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Total Episodes</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.episodes != null ? String(pick.episodes) : 'Unknown')}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Airing Status</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.statusLabel)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Release Date</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.startDate)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Ending Date</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.endDate)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Season</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.seasonLabel)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Release Year</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.releaseYear)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Episode Duration</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.durationLabel)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Source Material</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.sourceLabel)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Animation Studio</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.studiosLabel)}</span>
+                </div>
+                <div class="daily-detail-cell">
+                  <span class="daily-detail-label">Country</span>
+                  <span class="daily-detail-value">${escapeHtml(pick.countryLabel)}</span>
+                </div>
+              </div>
+            `
+            : ''
+        }
+
+        <div class="daily-trailer-section">
+          <div class="daily-trailer-header">
+            <span class="daily-trailer-label">OFFICIAL TRAILER</span>
+            ${
+              youtubeWatchUrl
+                ? `<a class="daily-yt-fallback-link" href="${escapeHtml(youtubeWatchUrl)}" target="_blank" rel="noopener noreferrer">Watch on YouTube ↗</a>`
+                : ''
+            }
+          </div>
+
+          ${
+            !trailerId
+              ? `<div class="daily-trailer-unavailable">Trailer preview is currently unavailable for this title.</div>`
+              : dr.trailerPlaying
+              ? `
+                <div class="daily-trailer-player-wrap">
+                  <iframe
+                    class="daily-trailer-iframe"
+                    src="${escapeHtml(youtubeEmbedUrl)}"
+                    title="${escapeHtml(pick.title)} Official Trailer"
+                    frameborder="0"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen
+                  ></iframe>
+                </div>
+                <div class="daily-trailer-hint">
+                  If playback is restricted by the video owner, use <a href="${escapeHtml(youtubeWatchUrl)}" target="_blank" rel="noopener noreferrer">Watch on YouTube</a>.
+                </div>
+              `
+              : `
+                <button type="button" class="daily-trailer-poster-btn" id="btn-random-play-trailer" aria-label="Play trailer">
+                  <img class="daily-trailer-thumb" src="${escapeHtml(trailerThumb)}" alt="${escapeHtml(pick.title)} trailer thumbnail" loading="lazy" />
+                  <span class="daily-trailer-overlay">
+                    <span class="daily-play-circle">▶</span>
+                    <span class="daily-play-caption">Play Trailer</span>
+                  </span>
+                </button>
+              `
+          }
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderTopAnimeSection() {
+  const top = state.topAnime;
+  const limits = [10, 25, 50, 100];
+  const timeframes = [
+    { key: 'weekly', label: 'Weekly' },
+    { key: 'monthly', label: 'Monthly' },
+    { key: 'seasonal', label: 'Seasonal' },
+    { key: 'yearly', label: 'Yearly' },
+    { key: 'all_time', label: 'All Time' }
+  ];
+
+  const crownSvg = `
+    <svg class="top-anime-crown-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2 18h20" />
+      <path d="M4 15L2.5 6l5.5 4 4-6 4 6 5.5-4L20 15H4z" />
+    </svg>
+  `;
+
+  return `
+    <section class="top-anime-section" aria-label="Top Anime">
+      <div class="top-anime-header-card">
+        <div class="top-anime-title-row">
+          <div class="top-anime-heading-group">
+            ${crownSvg}
+            <h2 class="top-anime-heading">Top Anime</h2>
+          </div>
+
+          <div class="top-source-toggle" id="top-source-toggle" role="tablist" aria-label="Ranking Source" data-active-source="${top.source === 'community' ? 'community' : 'all'}">
+            <span class="top-source-slider ${top.source === 'all' ? 'is-all' : 'is-community'}" id="top-source-slider" aria-hidden="true"></span>
+            <button type="button" role="tab" aria-selected="${top.source === 'community' ? 'true' : 'false'}" class="top-source-btn ${top.source === 'community' ? 'active' : ''}" data-top-source="community">
+              Community
+            </button>
+            <button type="button" role="tab" aria-selected="${top.source === 'all' ? 'true' : 'false'}" class="top-source-btn ${top.source === 'all' ? 'active' : ''}" data-top-source="all">
+              All
+            </button>
+          </div>
+        </div>
+
+        <div class="top-pill-row">
+          ${limits
+            .map(
+              (lim) => `
+                <button type="button" class="top-filter-pill ${top.limit === lim ? 'active' : ''}" data-top-limit="${lim}">
+                  Top ${lim}
+                </button>
+              `
+            )
+            .join('')}
+        </div>
+
+        <div class="top-filter-divider"></div>
+
+        <div class="top-pill-row">
+          ${timeframes
+            .map(
+              (tf) => `
+                <button type="button" class="top-filter-pill ${top.timeframe === tf.key ? 'active' : ''}" data-top-timeframe="${tf.key}">
+                  ${tf.label}
+                </button>
+              `
+            )
+            .join('')}
+        </div>
+      </div>
+
+      ${
+        top.loading
+          ? `
+            <div class="top-anime-list">
+              ${Array.from({ length: 6 })
+                .map(
+                  () => `
+                    <div class="top-anime-row-card top-skeleton-row">
+                      <div class="skeleton-pill" style="width:36px;height:36px;border-radius:12px;"></div>
+                      <div class="skeleton-pill" style="width:54px;height:76px;border-radius:10px;"></div>
+                      <div style="flex:1;display:flex;flex-direction:column;gap:8px;">
+                        <div class="skeleton-line" style="width:72%;height:16px;"></div>
+                        <div class="skeleton-line" style="width:45%;height:12px;"></div>
+                      </div>
+                    </div>
+                  `
+                )
+                .join('')}
+            </div>
+          `
+          : top.error
+          ? `
+            <div class="app-card" style="text-align:center;padding:34px 20px;">
+              <p style="color:var(--text-secondary);font-size:13.5px;margin-bottom:14px;">${escapeHtml(top.error)}</p>
+              <button type="button" class="btn-primary" id="btn-top-retry">TRY AGAIN</button>
+            </div>
+          `
+          : top.items.length === 0
+          ? `
+            <div class="app-card" style="text-align:center;padding:38px 22px;">
+              <div class="serif-heading" style="font-size:22px;margin-bottom:6px;">No rankings yet</div>
+              <p style="color:var(--text-secondary);font-size:13.5px;">
+                ${
+                  top.source === 'community'
+                    ? 'No community ratings match this timeframe yet. Try switching to All Time or rate an anime!'
+                    : 'No titles matched this ranking filter right now.'
+                }
+              </p>
+            </div>
+          `
+          : `
+            <div class="top-anime-list">
+              ${top.items
+                .map((item, idx) => {
+                  const rank = idx + 1;
+                  const rankClass = rank === 1 ? 'rank-1' : rank === 2 ? 'rank-2' : rank === 3 ? 'rank-3' : '';
+                  const metaBits = [
+                    item.format || null,
+                    item.releaseYear ? String(item.releaseYear) : null,
+                    item.episodes ? `${item.episodes} eps` : null
+                  ].filter(Boolean);
+                  return `
+                    <button
+                      type="button"
+                      class="top-anime-row-card"
+                      data-comm-open-anime="${item.animeId}"
+                    >
+                      <span class="top-rank-badge ${rankClass}">#${rank}</span>
+                      ${
+                        item.coverImage
+                          ? `<img class="top-anime-poster" src="${escapeHtml(item.coverImage)}" alt="${escapeHtml(item.title)}" loading="lazy" />`
+                          : `<div class="top-anime-poster top-anime-poster-fallback">★</div>`
+                      }
+                      <div class="top-anime-info">
+                        <div class="top-anime-name">${escapeHtml(item.title)}</div>
+                        ${
+                          metaBits.length > 0
+                            ? `<div class="top-anime-meta">${escapeHtml(metaBits.join(' • '))}</div>`
+                            : ''
+                        }
+                        ${
+                          item.genres && item.genres.length > 0
+                            ? `<div class="top-anime-genres">${item.genres
+                                .slice(0, 3)
+                                .map((g) => `<span class="top-anime-genre-tag">${escapeHtml(g)}</span>`)
+                                .join('')}</div>`
+                            : ''
+                        }
+                      </div>
+                      <div class="top-anime-score-col">
+                        <span class="top-anime-score-pill">★ ${escapeHtml(item.scoreDisplay)}</span>
+                        ${
+                          item.voteCount != null
+                            ? `<span class="top-anime-votes">${item.voteCount} ${item.voteCount === 1 ? 'rating' : 'ratings'}</span>`
+                            : ''
+                        }
+                      </div>
+                    </button>
+                  `;
+                })
+                .join('')}
+            </div>
+          `
+      }
+    </section>
+  `;
 }
 
 async function resolveFullSeasonChain(rootMedia, explicitOverrideMode = null) {
@@ -7825,7 +9152,16 @@ function renderCommunityScreen() {
       ? []
       : (state.notifications.unseenAnime || []).filter((u) => !shownAnimeIds.has(Number(u.anime_id)));
 
-  const viewTab = state.communityViewTab === 'tagged' ? 'tagged' : 'feed';
+  const validCommunityTabs = new Set(COMMUNITY_TAB_ORDER);
+  const viewTab = validCommunityTabs.has(state.communityViewTab) ? state.communityViewTab : 'feed';
+  const stageSlideClass =
+    lastCommunitySlideDir > 0
+      ? 'slide-from-right'
+      : lastCommunitySlideDir < 0
+      ? 'slide-from-left'
+      : '';
+  lastCommunitySlideDir = 0;
+
   const unreadTaggedCount = Math.max(
     Number(state.notifications.unreadCount || 0),
     (state.notifications.unseenAnime || []).reduce((acc, u) => acc + Math.max(1, Number(u.unseen_count || 1)), 0)
@@ -7835,13 +9171,20 @@ function renderCommunityScreen() {
   return `
     ${topBar}
     <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
-      <div class="community-view-switcher">
-        <button type="button" class="community-view-tab ${viewTab === 'feed' ? 'active' : ''}" data-comm-view-tab="feed">
+      <div class="community-view-switcher" id="community-view-switcher" role="tablist" aria-label="Community Sections">
+        <span class="community-view-slider" id="community-view-slider" aria-hidden="true"></span>
+        <button type="button" role="tab" aria-selected="${viewTab === 'feed' ? 'true' : 'false'}" class="community-view-tab ${viewTab === 'feed' ? 'active' : ''}" data-comm-view-tab="feed">
           Community Feed
         </button>
-        <button type="button" class="community-view-tab ${viewTab === 'tagged' ? 'active' : ''}" data-comm-view-tab="tagged">
+        <button type="button" role="tab" aria-selected="${viewTab === 'tagged' ? 'true' : 'false'}" class="community-view-tab ${viewTab === 'tagged' ? 'active' : ''}" data-comm-view-tab="tagged">
           <span>Tagged You</span>
           ${unreadTaggedCount > 0 ? `<span class="tagged-count-badge">${unreadTaggedCount > 99 ? '99+' : unreadTaggedCount}</span>` : ''}
+        </button>
+        <button type="button" role="tab" aria-selected="${viewTab === 'random' ? 'true' : 'false'}" class="community-view-tab ${viewTab === 'random' ? 'active' : ''}" data-comm-view-tab="random">
+          Random
+        </button>
+        <button type="button" role="tab" aria-selected="${viewTab === 'top' ? 'true' : 'false'}" class="community-view-tab ${viewTab === 'top' ? 'active' : ''}" data-comm-view-tab="top">
+          Top
         </button>
       </div>
       ${
@@ -7851,8 +9194,13 @@ function renderCommunityScreen() {
       }
     </div>
 
+    <div class="community-section-stage ${stageSlideClass}" id="community-section-stage">
     ${
-      viewTab === 'tagged'
+      viewTab === 'random'
+        ? renderRandomAnimeSection()
+        : viewTab === 'top'
+        ? renderTopAnimeSection()
+        : viewTab === 'tagged'
         ? `
           ${nState.error ? `<div class="feedback-banner error" style="margin-bottom:12px;">! ${escapeHtml(nState.error)}</div>` : ''}
           ${
@@ -8273,6 +9621,7 @@ function renderCommunityScreen() {
     }
     `
     }
+    </div>
   `;
 }
 
@@ -11352,6 +12701,10 @@ function bindAppEvents() {
         refreshUnreadNotificationCount().then(() => updateCommunityRedDotsInPlace());
         if (state.communityViewTab === 'tagged' && state.session) {
           loadUserNotifications(true);
+        } else if (state.communityViewTab === 'random') {
+          loadDailyRandomAnime(false);
+        } else if (state.communityViewTab === 'top') {
+          loadTopAnimeCatalog(false);
         }
       }
     };
@@ -12039,15 +13392,176 @@ function bindAppEvents() {
   if (btnCreateCol) btnCreateCol.onclick = () => { state.showCreateCollectionModal = true; renderApp(); };
   if (btnNewColInline) btnNewColInline.onclick = () => { state.showCreateCollectionModal = true; renderApp(); };
 
-  // Community events
+  // Community events & sliding pill animations
+  const commSwitcher = document.getElementById('community-view-switcher');
+  const commSlider = document.getElementById('community-view-slider');
+  if (commSwitcher && commSlider) {
+    const activeTabBtn = commSwitcher.querySelector('.community-view-tab.active');
+    if (activeTabBtn) {
+      const targetLeft = activeTabBtn.offsetLeft;
+      const targetWidth = activeTabBtn.offsetWidth;
+      if (lastCommunityTabRect && (lastCommunityTabRect.left !== targetLeft || lastCommunityTabRect.width !== targetWidth)) {
+        commSlider.style.transition = 'none';
+        commSlider.style.transform = `translate3d(${lastCommunityTabRect.left}px, 0, 0)`;
+        commSlider.style.width = `${lastCommunityTabRect.width}px`;
+        commSlider.style.opacity = '1';
+        void commSlider.offsetWidth;
+        commSlider.style.transition = '';
+        requestAnimationFrame(() => {
+          commSlider.style.transform = `translate3d(${targetLeft}px, 0, 0)`;
+          commSlider.style.width = `${targetWidth}px`;
+        });
+      } else {
+        commSlider.style.transition = 'none';
+        commSlider.style.transform = `translate3d(${targetLeft}px, 0, 0)`;
+        commSlider.style.width = `${targetWidth}px`;
+        commSlider.style.opacity = '1';
+        void commSlider.offsetWidth;
+        commSlider.style.transition = '';
+      }
+      lastCommunityTabRect = { left: targetLeft, width: targetWidth };
+      try {
+        activeTabBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      } catch (_) {}
+    }
+  }
+
+  const commStage = document.getElementById('community-section-stage');
+  if (commStage) {
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let ignoreSwipe = false;
+    commStage.addEventListener(
+      'touchstart',
+      (e) => {
+        if (!e.touches || e.touches.length !== 1) return;
+        const target = e.target;
+        ignoreSwipe = Boolean(
+          target &&
+            target.closest &&
+            target.closest('.capsule-strip, .top-pill-row, .top-source-toggle, .community-view-switcher, iframe, input, textarea')
+        );
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+      },
+      { passive: true }
+    );
+    commStage.addEventListener(
+      'touchend',
+      (e) => {
+        if (ignoreSwipe || !e.changedTouches || e.changedTouches.length !== 1) return;
+        const dx = e.changedTouches[0].clientX - touchStartX;
+        const dy = e.changedTouches[0].clientY - touchStartY;
+        if (Math.abs(dx) > 56 && Math.abs(dx) > Math.abs(dy) * 1.45) {
+          const curIdx = COMMUNITY_TAB_ORDER.indexOf(state.communityViewTab);
+          if (curIdx >= 0) {
+            const nextIdx = dx < 0 ? curIdx + 1 : curIdx - 1;
+            if (nextIdx >= 0 && nextIdx < COMMUNITY_TAB_ORDER.length) {
+              switchCommunityViewTab(COMMUNITY_TAB_ORDER[nextIdx]);
+            }
+          }
+        }
+      },
+      { passive: true }
+    );
+  }
+
   document.querySelectorAll('[data-comm-view-tab]').forEach((btn) => {
     btn.onclick = () => {
-      const next = btn.getAttribute('data-comm-view-tab') === 'tagged' ? 'tagged' : 'feed';
-      state.communityViewTab = next;
+      switchCommunityViewTab(btn.getAttribute('data-comm-view-tab') || 'feed');
+    };
+  });
+  const btnRandomToggleDetails = document.getElementById('btn-random-toggle-details');
+  if (btnRandomToggleDetails) {
+    btnRandomToggleDetails.onclick = () => {
+      state.dailyRandom.detailsExpanded = !state.dailyRandom.detailsExpanded;
       renderApp();
-      if (next === 'tagged' && state.session) {
-        loadUserNotifications(true);
+    };
+  }
+  const btnRandomPlayTrailer = document.getElementById('btn-random-play-trailer');
+  if (btnRandomPlayTrailer) {
+    btnRandomPlayTrailer.onclick = () => {
+      state.dailyRandom.trailerPlaying = true;
+      renderApp();
+    };
+  }
+  const btnRandomRetry = document.getElementById('btn-random-retry');
+  if (btnRandomRetry) {
+    btnRandomRetry.onclick = () => loadDailyRandomAnime(true);
+  }
+
+  const topSourceToggle = document.getElementById('top-source-toggle');
+  const topSourceSlider = document.getElementById('top-source-slider');
+  if (topSourceToggle && topSourceSlider) {
+    const activeSrc = state.topAnime.source === 'community' ? 'community' : 'all';
+    if (lastTopSourceSlideFrom && lastTopSourceSlideFrom !== activeSrc) {
+      topSourceSlider.style.transition = 'none';
+      topSourceSlider.classList.toggle('is-all', lastTopSourceSlideFrom === 'all');
+      topSourceSlider.classList.toggle('is-community', lastTopSourceSlideFrom === 'community');
+      void topSourceSlider.offsetWidth;
+      topSourceSlider.style.transition = '';
+      requestAnimationFrame(() => {
+        topSourceSlider.classList.toggle('is-all', activeSrc === 'all');
+        topSourceSlider.classList.toggle('is-community', activeSrc === 'community');
+      });
+    }
+    lastTopSourceSlideFrom = null;
+
+    let toggleDragStartX = 0;
+    let toggleDragging = false;
+    topSourceToggle.addEventListener(
+      'pointerdown',
+      (e) => {
+        toggleDragStartX = e.clientX;
+        toggleDragging = true;
+      },
+      { passive: true }
+    );
+    topSourceToggle.addEventListener(
+      'pointerup',
+      (e) => {
+        if (!toggleDragging) return;
+        toggleDragging = false;
+        const dx = e.clientX - toggleDragStartX;
+        if (Math.abs(dx) >= 24) {
+          switchTopAnimeSource(dx > 0 ? 'all' : 'community');
+        }
+      },
+      { passive: true }
+    );
+  }
+
+  document.querySelectorAll('[data-top-source]').forEach((btn) => {
+    btn.onclick = () => {
+      switchTopAnimeSource(btn.getAttribute('data-top-source'));
+    };
+  });
+  document.querySelectorAll('[data-top-limit]').forEach((btn) => {
+    btn.onclick = () => {
+      const lim = Number(btn.getAttribute('data-top-limit') || 10);
+      if ([10, 25, 50, 100].includes(lim) && state.topAnime.limit !== lim) {
+        state.topAnime.limit = lim;
+        loadTopAnimeCatalog(false);
       }
+    };
+  });
+  document.querySelectorAll('[data-top-timeframe]').forEach((btn) => {
+    btn.onclick = () => {
+      const tf = btn.getAttribute('data-top-timeframe') || 'all_time';
+      if (['weekly', 'monthly', 'seasonal', 'yearly', 'all_time'].includes(tf) && state.topAnime.timeframe !== tf) {
+        state.topAnime.timeframe = tf;
+        loadTopAnimeCatalog(false);
+      }
+    };
+  });
+  const btnTopRetry = document.getElementById('btn-top-retry');
+  if (btnTopRetry) {
+    btnTopRetry.onclick = () => loadTopAnimeCatalog(true);
+  }
+  document.querySelectorAll('[data-comm-open-anime]').forEach((el) => {
+    el.onclick = () => {
+      const aid = Number(el.getAttribute('data-comm-open-anime') || 0);
+      if (aid > 0) openAnimeDetail(aid);
     };
   });
   const btnCommTaggedMarkAll = document.getElementById('btn-comm-tagged-mark-all');

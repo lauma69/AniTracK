@@ -5,6 +5,8 @@ import com.example.data.local.AnimeEntity
 import com.example.model.AnimeCollection
 import com.example.model.AuthSession
 import com.example.model.BuiltInAvatarFrame
+import com.example.model.DailyAnimeFormatters
+import com.example.model.DailyAnimePick
 import com.example.model.CommunityActivityItem
 import com.example.model.CommunityCapacity
 import com.example.model.CommunityMember
@@ -2280,6 +2282,421 @@ class SupabaseDatabaseService {
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    suspend fun fetchDailyRandomAnime(session: AuthSession?): Result<DailyAnimePick?> = withContext(Dispatchers.IO) {
+        val todayUtc = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString()
+        val token = session?.accessToken?.takeIf { it.isNotBlank() } ?: AppConfig.supabaseAnonKey
+        var latestDbPick: DailyAnimePick? = null
+        val excludedIds = mutableSetOf<Int>()
+
+        // Stage 1: Check Supabase public.daily_anime for today's canonical UTC row
+        if (AppConfig.isSupabaseConfigured) {
+            runCatching {
+                val req = requestBuilder("/rest/v1/daily_anime?select=*&order=selection_date.desc&limit=1", token)
+                    .get()
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (resp.isSuccessful && body.startsWith("[")) {
+                        val arr = JSONArray(body)
+                        if (arr.length() > 0) {
+                            latestDbPick = parseDailyAnimePickJson(arr.getJSONObject(0))
+                        }
+                    }
+                }
+            }
+
+            if (latestDbPick != null && latestDbPick?.selectionDate == todayUtc) {
+                return@withContext Result.success(latestDbPick)
+            }
+
+            // Stage 2: Try Edge Function if deployed
+            if (session != null && session.accessToken.isNotBlank()) {
+                val fnPick = runCatching {
+                    val fnReq = requestBuilder("/functions/v1/daily-random-anime", session.accessToken)
+                        .post("{\"source\":\"client_ensure\"}".toRequestBody("application/json".toMediaType()))
+                        .build()
+                    client.newCall(fnReq).execute().use { fnResp ->
+                        val fnBody = fnResp.body?.string().orEmpty()
+                        if (fnResp.isSuccessful && fnBody.startsWith("{")) {
+                            val root = JSONObject(fnBody)
+                            val obj = root.optJSONObject("data") ?: root.optJSONObject("anime")
+                            obj?.let { parseDailyAnimePickJson(it) }
+                        } else {
+                            null
+                        }
+                    }
+                }.getOrNull()
+                if (fnPick != null && fnPick.anilistId > 0) {
+                    return@withContext Result.success(fnPick)
+                }
+            }
+
+            // Load previously featured anime IDs so repeats are avoided
+            runCatching {
+                val rpcReq = requestBuilder("/rest/v1/rpc/get_featured_anime_ids", token)
+                    .post("{}".toRequestBody("application/json".toMediaType()))
+                    .build()
+                client.newCall(rpcReq).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (resp.isSuccessful && body.startsWith("[")) {
+                        val arr = JSONArray(body)
+                        for (i in 0 until arr.length()) {
+                            val id = arr.optInt(i, 0)
+                            if (id > 0) excludedIds.add(id)
+                        }
+                    }
+                }
+            }
+            if (excludedIds.isEmpty()) {
+                runCatching {
+                    val histReq = requestBuilder("/rest/v1/daily_anime?select=anilist_id&limit=1000", token)
+                        .get()
+                        .build()
+                    client.newCall(histReq).execute().use { resp ->
+                        val body = resp.body?.string().orEmpty()
+                        if (resp.isSuccessful && body.startsWith("[")) {
+                            val arr = JSONArray(body)
+                            for (i in 0 until arr.length()) {
+                                val id = arr.optJSONObject(i)?.optInt("anilist_id", 0) ?: 0
+                                if (id > 0) excludedIds.add(id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Stage 3: Complete automatic daily selector (deterministic UTC-date seed + AniList GraphQL + YouTube oEmbed check)
+        val autoCandidate = runCatching {
+            pickAutomaticDailyAnimeRow(todayUtc = todayUtc, excludedIds = excludedIds)
+        }.getOrNull()
+
+        if (autoCandidate != null) {
+            // Stage 4: Atomically lock today's pick into Supabase so all users read the canonical DB row
+            if (AppConfig.isSupabaseConfigured && session != null && session.accessToken.isNotBlank()) {
+                val claimed = runCatching {
+                    val rpcPayload = JSONObject()
+                        .put("p_anilist_id", autoCandidate.optInt("anilist_id"))
+                        .put("p_title", autoCandidate.optString("title"))
+                        .put("p_rating", autoCandidate.optInt("rating"))
+                        .put("p_cover_image", autoCandidate.optString("cover_image"))
+                        .put("p_banner_image", autoCandidate.optString("banner_image").ifBlank { JSONObject.NULL })
+                        .put("p_trailer_id", autoCandidate.optString("trailer_id"))
+                        .put("p_anime_metadata", autoCandidate.optJSONObject("anime_metadata") ?: JSONObject())
+
+                    val claimReq = requestBuilder("/rest/v1/rpc/claim_daily_anime_selection", session.accessToken)
+                        .post(rpcPayload.toString().toRequestBody("application/json".toMediaType()))
+                        .build()
+                    client.newCall(claimReq).execute().use { resp ->
+                        val body = resp.body?.string().orEmpty()
+                        if (resp.isSuccessful && body.startsWith("[")) {
+                            val arr = JSONArray(body)
+                            if (arr.length() > 0) parseDailyAnimePickJson(arr.getJSONObject(0)) else null
+                        } else if (resp.isSuccessful && body.startsWith("{")) {
+                            parseDailyAnimePickJson(JSONObject(body))
+                        } else {
+                            null
+                        }
+                    }
+                }.getOrNull()
+                if (claimed != null && claimed.anilistId > 0) {
+                    return@withContext Result.success(claimed)
+                }
+            }
+            return@withContext Result.success(parseDailyAnimePickJson(autoCandidate))
+        }
+
+        if (latestDbPick != null) {
+            return@withContext Result.success(latestDbPick)
+        }
+        Result.failure(Exception("Unable to load today's featured anime right now. Please try again."))
+    }
+
+    private class DailyUtcPrng(seedKey: String) {
+        private var state: UInt = fnv1a32(seedKey)
+
+        private fun fnv1a32(input: String): UInt {
+            var h = 0x811c9dc5u
+            for (ch in input) {
+                h = (h xor ch.code.toUInt()) * 0x01000193u
+            }
+            return h
+        }
+
+        fun nextUInt(): UInt {
+            state += 0x6D2B79F5u
+            var t = (state xor (state shr 15)) * (1u or state)
+            t = (t + ((t xor (t shr 7)) * (61u or t))) xor t
+            return t xor (t shr 14)
+        }
+
+        fun nextInt(bound: Int): Int {
+            if (bound <= 1) return 0
+            return (nextUInt() % bound.toUInt()).toInt()
+        }
+    }
+
+    private fun isYouTubeTrailerEmbeddable(videoId: String): Boolean {
+        if (!DailyAnimeFormatters.isValidYouTubeId(videoId)) return false
+        return runCatching {
+            val url = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$videoId&format=json"
+            val req = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("Accept", "application/json")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                resp.isSuccessful
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun formatFuzzyDateObj(obj: JSONObject?): String? {
+        if (obj == null) return null
+        val y = obj.optInt("year", 0)
+        if (y <= 0) return null
+        val m = obj.optInt("month", 0)
+        val d = obj.optInt("day", 0)
+        return when {
+            m > 0 && d > 0 -> String.format(java.util.Locale.US, "%04d-%02d-%02d", y, m, d)
+            m > 0 -> String.format(java.util.Locale.US, "%04d-%02d", y, m)
+            else -> y.toString()
+        }
+    }
+
+    private fun pickAutomaticDailyAnimeRow(todayUtc: String, excludedIds: Set<Int>): JSONObject? {
+        val prng = DailyUtcPrng("anime-universe-daily-pick-v1:$todayUtc")
+        val pagePool = (1..32).toMutableList()
+        for (i in pagePool.lastIndex downTo 1) {
+            val j = prng.nextInt(i + 1)
+            val tmp = pagePool[i]
+            pagePool[i] = pagePool[j]
+            pagePool[j] = tmp
+        }
+
+        val query = """
+            query (${'$'}page: Int!, ${'$'}perPage: Int!) {
+              Page(page: ${'$'}page, perPage: ${'$'}perPage) {
+                media(
+                  type: ANIME,
+                  isAdult: false,
+                  averageScore_greater: 59,
+                  status_in: [FINISHED, RELEASING],
+                  sort: [POPULARITY_DESC]
+                ) {
+                  id
+                  title { english romaji native }
+                  coverImage { extraLarge large color }
+                  bannerImage
+                  averageScore
+                  episodes
+                  startDate { year month day }
+                  endDate { year month day }
+                  status
+                  format
+                  season
+                  seasonYear
+                  genres
+                  description(asHtml: false)
+                  duration
+                  source
+                  countryOfOrigin
+                  studios(isMain: true) { nodes { name } }
+                  trailer { id site thumbnail }
+                }
+              }
+            }
+        """.trimIndent()
+
+        for (attempt in 0 until 4) {
+            val page = pagePool[attempt % pagePool.size]
+            val payload = JSONObject()
+                .put("query", query)
+                .put("variables", JSONObject().put("page", page).put("perPage", 50))
+            val req = Request.Builder()
+                .url(AppConfig.ANILIST_GRAPHQL_URL)
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "application/json")
+                .build()
+
+            val mediaArr = runCatching {
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val root = JSONObject(resp.body?.string().orEmpty())
+                    root.optJSONObject("data")?.optJSONObject("Page")?.optJSONArray("media")
+                }
+            }.getOrNull() ?: continue
+
+            val candidates = mutableListOf<JSONObject>()
+            for (i in 0 until mediaArr.length()) {
+                val m = mediaArr.optJSONObject(i) ?: continue
+                val id = m.optInt("id", 0)
+                val score = m.optInt("averageScore", -1)
+                if (id <= 0 || id in excludedIds || score < 60 || score > 100) continue
+                val titleObj = m.optJSONObject("title")
+                val english = titleObj?.optString("english")?.takeIf { it.isNotBlank() && it != "null" }
+                val romaji = titleObj?.optString("romaji")?.takeIf { it.isNotBlank() && it != "null" }
+                val nativeTitle = titleObj?.optString("native")?.takeIf { it.isNotBlank() && it != "null" }
+                if (english == null && romaji == null && nativeTitle == null) continue
+                val coverObj = m.optJSONObject("coverImage")
+                val cover = coverObj?.optString("extraLarge")?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: coverObj?.optString("large")?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: continue
+                val trailerObj = m.optJSONObject("trailer") ?: continue
+                val trailerSite = trailerObj.optString("site", "").lowercase(java.util.Locale.US)
+                val trailerId = trailerObj.optString("id", "").trim()
+                if (trailerSite != "youtube" || !DailyAnimeFormatters.isValidYouTubeId(trailerId)) continue
+                if (cover.isBlank()) continue
+                candidates.add(m)
+            }
+
+            // Deterministic Fisher-Yates shuffle seeded by today's UTC date
+            for (i in candidates.lastIndex downTo 1) {
+                val j = prng.nextInt(i + 1)
+                val tmp = candidates[i]
+                candidates[i] = candidates[j]
+                candidates[j] = tmp
+            }
+
+            var checked = 0
+            for (m in candidates) {
+                val trailerId = m.optJSONObject("trailer")?.optString("id", "")?.trim().orEmpty()
+                if (checked >= 8) break
+                checked++
+                if (!isYouTubeTrailerEmbeddable(trailerId)) continue
+
+                val id = m.optInt("id")
+                val score = m.optInt("averageScore")
+                val titleObj = m.optJSONObject("title")
+                val english = titleObj?.optString("english")?.takeIf { it.isNotBlank() && it != "null" }
+                val romaji = titleObj?.optString("romaji")?.takeIf { it.isNotBlank() && it != "null" }
+                val nativeTitle = titleObj?.optString("native")?.takeIf { it.isNotBlank() && it != "null" }
+                val displayTitle = english ?: romaji ?: nativeTitle ?: "Unknown"
+                val coverObj = m.optJSONObject("coverImage")
+                val coverImage = coverObj?.optString("extraLarge")?.takeIf { it.isNotBlank() && it != "null" }
+                    ?: coverObj?.optString("large").orEmpty()
+                val bannerImage = m.optString("bannerImage").takeIf { it.isNotBlank() && it != "null" }
+                val studiosArr = JSONArray()
+                val studioNodes = m.optJSONObject("studios")?.optJSONArray("nodes")
+                if (studioNodes != null) {
+                    for (sIdx in 0 until studioNodes.length()) {
+                        val sName = studioNodes.optJSONObject(sIdx)?.optString("name")?.trim()
+                        if (!sName.isNullOrBlank() && sName != "null") studiosArr.put(sName)
+                    }
+                }
+                val startDateStr = formatFuzzyDateObj(m.optJSONObject("startDate"))
+                val endDateStr = formatFuzzyDateObj(m.optJSONObject("endDate"))
+                val seasonYear = m.optInt("seasonYear", -1).takeIf { it > 0 }
+                    ?: m.optJSONObject("startDate")?.optInt("year", -1)?.takeIf { it > 0 }
+
+                val metadata = JSONObject()
+                    .put("anilist_id", id)
+                    .put(
+                        "title",
+                        JSONObject()
+                            .put("english", english ?: JSONObject.NULL)
+                            .put("romaji", romaji ?: JSONObject.NULL)
+                            .put("native", nativeTitle ?: JSONObject.NULL)
+                    )
+                    .put("cover_image", coverImage)
+                    .put("banner_image", bannerImage ?: JSONObject.NULL)
+                    .put("average_score", score)
+                    .put("episodes", if (m.isNull("episodes")) JSONObject.NULL else m.optInt("episodes"))
+                    .put("start_date", startDateStr ?: JSONObject.NULL)
+                    .put("end_date", endDateStr ?: JSONObject.NULL)
+                    .put("status", m.optString("status").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
+                    .put("format", m.optString("format").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
+                    .put("season", m.optString("season").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
+                    .put("season_year", seasonYear ?: JSONObject.NULL)
+                    .put("genres", m.optJSONArray("genres") ?: JSONArray())
+                    .put("description", m.optString("description", ""))
+                    .put("duration", if (m.isNull("duration")) JSONObject.NULL else m.optInt("duration"))
+                    .put("source", m.optString("source").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
+                    .put("country_of_origin", m.optString("countryOfOrigin").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
+                    .put("studios", studiosArr)
+                    .put("trailer", JSONObject().put("id", trailerId).put("site", "youtube"))
+
+                return JSONObject()
+                    .put("id", "auto-$todayUtc-$id")
+                    .put("selection_date", todayUtc)
+                    .put("anilist_id", id)
+                    .put("title", displayTitle)
+                    .put("rating", score)
+                    .put("cover_image", coverImage)
+                    .put("banner_image", bannerImage ?: JSONObject.NULL)
+                    .put("trailer_id", trailerId)
+                    .put("anime_metadata", metadata)
+            }
+        }
+        return null
+    }
+
+    fun parseDailyAnimePickJson(row: JSONObject): DailyAnimePick {
+        val meta = row.optJSONObject("anime_metadata") ?: JSONObject()
+        val titleObj = meta.optJSONObject("title")
+        val titleEnglish = titleObj?.optString("english")?.takeIf { it.isNotBlank() && it != "null" }
+        val titleRomaji = titleObj?.optString("romaji")?.takeIf { it.isNotBlank() && it != "null" }
+        val titleNative = titleObj?.optString("native")?.takeIf { it.isNotBlank() && it != "null" }
+        val displayTitle = row.optString("title").takeIf { it.isNotBlank() && it != "null" }
+            ?: titleEnglish
+            ?: titleRomaji
+            ?: titleNative
+            ?: "Unknown"
+        val secondaryTitle = when {
+            !titleRomaji.isNullOrBlank() && titleRomaji != displayTitle -> titleRomaji
+            !titleNative.isNullOrBlank() && titleNative != displayTitle -> titleNative
+            else -> ""
+        }
+        val ratingVal = row.optInt("rating", meta.optInt("average_score", -1)).takeIf { it in 1..100 }
+        val trailerObj = meta.optJSONObject("trailer")
+        val rawTrailerId = row.optString("trailer_id").takeIf { it.isNotBlank() && it != "null" }
+            ?: trailerObj?.optString("id")?.takeIf { it.isNotBlank() && it != "null" }
+        val genres = buildList {
+            val gArr = meta.optJSONArray("genres")
+            if (gArr != null) {
+                for (i in 0 until gArr.length()) {
+                    gArr.optString(i).trim().takeIf { it.isNotBlank() && it != "null" }?.let { add(it) }
+                }
+            }
+        }
+        val studios = buildList {
+            val sArr = meta.optJSONArray("studios")
+            if (sArr != null) {
+                for (i in 0 until sArr.length()) {
+                    sArr.optString(i).trim().takeIf { it.isNotBlank() && it != "null" }?.let { add(it) }
+                }
+            }
+        }
+
+        return DailyAnimePick(
+            id = row.optString("id", ""),
+            selectionDate = row.optString("selection_date", ""),
+            anilistId = row.optInt("anilist_id", meta.optInt("anilist_id", 0)),
+            title = displayTitle,
+            secondaryTitle = secondaryTitle,
+            rating100 = ratingVal,
+            coverImage = row.optString("cover_image").takeIf { it.isNotBlank() && it != "null" }
+                ?: meta.optString("cover_image", ""),
+            bannerImage = row.optString("banner_image").takeIf { it.isNotBlank() && it != "null" }
+                ?: meta.optString("banner_image").takeIf { it.isNotBlank() && it != "null" },
+            trailerId = rawTrailerId?.takeIf { DailyAnimeFormatters.isValidYouTubeId(it) },
+            episodes = meta.optInt("episodes", -1).takeIf { it > 0 },
+            startDate = meta.optString("start_date").takeIf { it.isNotBlank() && it != "null" },
+            endDate = meta.optString("end_date").takeIf { it.isNotBlank() && it != "null" },
+            rawStatus = meta.optString("status").takeIf { it.isNotBlank() && it != "null" },
+            rawFormat = meta.optString("format").takeIf { it.isNotBlank() && it != "null" },
+            rawSeason = meta.optString("season").takeIf { it.isNotBlank() && it != "null" },
+            releaseYear = meta.optInt("season_year", -1).takeIf { it > 0 },
+            durationMinutes = meta.optInt("duration", -1).takeIf { it > 0 },
+            rawSource = meta.optString("source").takeIf { it.isNotBlank() && it != "null" },
+            studios = studios,
+            countryOfOrigin = meta.optString("country_of_origin").takeIf { it.isNotBlank() && it != "null" },
+            genres = genres,
+            description = DailyAnimeFormatters.stripHtml(meta.optString("description", ""))
+        )
     }
 
     private fun parsePostgrestError(body: String, fallback: String): String {
