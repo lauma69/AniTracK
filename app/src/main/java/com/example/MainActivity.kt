@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.compose.ui.window.DialogProperties
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -59,6 +60,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -181,6 +183,20 @@ class MainActivity : ComponentActivity() {
                 accentTheme = preferences.accentTheme
             ) {
                 val colors = AppTheme.colors
+                SideEffect {
+                    val barStyle = if (colors.isDark) {
+                        SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(
+                            android.graphics.Color.TRANSPARENT,
+                            android.graphics.Color.TRANSPARENT
+                        )
+                    }
+                    enableEdgeToEdge(
+                        statusBarStyle = barStyle,
+                        navigationBarStyle = barStyle
+                    )
+                }
                 var showSplash by rememberSaveable { mutableStateOf(true) }
                 val snackbarHostState = remember { SnackbarHostState() }
 

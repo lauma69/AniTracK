@@ -103,19 +103,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.example.R
 import com.example.model.BuiltInAvatar
-import com.example.ui.theme.AshDim
-import com.example.ui.theme.AshText
-import com.example.ui.theme.ChampagneGold
-import com.example.ui.theme.ChampagneGoldBright
-import com.example.ui.theme.ChampagneGoldSoft
-import com.example.ui.theme.ChampagneOnGold
+import androidx.compose.runtime.ReadOnlyComposable
+import com.example.ui.theme.AppTheme
 import com.example.ui.theme.CormorantSerifFamily
 import com.example.ui.theme.InterUiFamily
-import com.example.ui.theme.IvoryText
 import com.example.ui.theme.MicroUpperLabel
-import com.example.ui.theme.ObsidianBlack
-import com.example.ui.theme.ObsidianSurface
-import com.example.ui.theme.ObsidianSurface2
 import com.example.ui.widgets.RoundAvatarCarousel
 import com.example.ui.widgets.drawableRes
 import com.example.ui.widgets.rememberReducedMotion
@@ -123,11 +115,37 @@ import com.example.util.ErrorSanitizer
 import com.example.viewmodel.AnimeViewModel
 import com.example.viewmodel.OnboardingStage
 
-private val AuthBgTop = ObsidianBlack
-private val AuthBgBottom = Color(0xFF0A0912)
-private val AuthGlassCard = ObsidianSurface.copy(alpha = 0.90f)
-private val AuthFieldBg = ObsidianSurface2.copy(alpha = 0.94f)
-private val RoyalPlumGlow = Color(0xFF281B3E)
+private val ObsidianBlack: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.backgroundMain
+private val ObsidianSurface: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.cardBackground
+private val ObsidianSurface2: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.elevatedSurface
+private val ChampagneGold: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.accentPrimary
+private val ChampagneGoldBright: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.accentSecondary
+private val ChampagneGoldSoft: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.highlight
+private val ChampagneOnGold: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.onAccentPrimary
+private val IvoryText: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.textPrimary
+private val AshText: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.textSecondary
+private val AshDim: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.textMuted
+
+private val AuthBgTop: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.backgroundMain
+private val AuthBgBottom: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.backgroundSecondary
+private val AuthGlassCard: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.cardBackground.copy(alpha = 0.96f)
+private val AuthFieldBg: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.elevatedSurface.copy(alpha = 0.94f)
+private val RoyalPlumGlow: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.accentSecondary
 
 @Composable
 fun AuthScreen(
@@ -171,14 +189,14 @@ fun AuthScreen(
             .systemBarsPadding()
             .imePadding()
     ) {
-        // Ambient Champagne Gold & Royal Plum aura
+        val topGlowColor = (if (activeOnboardingStage == OnboardingStage.AVATAR) RoyalPlumGlow else ChampagneGold)
+            .copy(alpha = if (AppTheme.colors.isDark) 0.20f else 0.12f)
+        val bottomGlowColor = ChampagneGoldBright.copy(alpha = if (AppTheme.colors.isDark) 0.10f else 0.08f)
+        // Ambient theme accent aura
         Canvas(modifier = Modifier.fillMaxSize()) {
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(
-                        (if (activeOnboardingStage == OnboardingStage.AVATAR) RoyalPlumGlow else ChampagneGold).copy(alpha = 0.22f),
-                        Color.Transparent
-                    ),
+                    colors = listOf(topGlowColor, Color.Transparent),
                     center = Offset(size.width * 0.5f, size.height * 0.16f),
                     radius = size.maxDimension * 0.48f
                 ),
@@ -187,7 +205,7 @@ fun AuthScreen(
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(ChampagneGoldBright.copy(alpha = 0.10f), Color.Transparent),
+                    colors = listOf(bottomGlowColor, Color.Transparent),
                     center = Offset(size.width * 0.5f, size.height * 0.86f),
                     radius = size.maxDimension * 0.52f
                 ),
@@ -1298,13 +1316,14 @@ private fun GoldCtaButton(
     val gradient = Brush.horizontalGradient(
         colors = listOf(ChampagneGoldSoft, ChampagneGold, ChampagneGoldBright)
     )
+    val disabledBg = AppTheme.colors.borderSubtle
     Button(
         onClick = onClick,
         enabled = enabled,
         shape = RoundedCornerShape(26.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = Color.Transparent,
-            disabledContainerColor = Color.White.copy(alpha = 0.14f)
+            disabledContainerColor = disabledBg
         ),
         contentPadding = PaddingValues(0.dp),
         modifier = modifier
@@ -1323,7 +1342,7 @@ private fun GoldCtaButton(
                 .clip(RoundedCornerShape(26.dp))
                 .then(
                     if (enabled) Modifier.background(gradient)
-                    else Modifier.background(Color.White.copy(alpha = 0.14f))
+                    else Modifier.background(disabledBg)
                 ),
             contentAlignment = Alignment.Center
         ) {
@@ -1401,7 +1420,7 @@ private fun StepProgressHeader(
                         .clip(RoundedCornerShape(4.dp))
                         .background(
                             if (i <= step) ChampagneGold
-                            else Color.White.copy(alpha = 0.16f)
+                            else AppTheme.colors.borderSubtle
                         )
                 )
             }
@@ -1414,17 +1433,18 @@ private fun AuthFeedbackBanner(
     error: String?,
     info: String?
 ) {
+    val colors = AppTheme.colors
     AnimatedVisibility(visible = !error.isNullOrBlank()) {
         if (!error.isNullOrBlank()) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
-                color = Color(0xFF7F1D1D).copy(alpha = 0.85f),
-                border = BorderStroke(1.dp, Color(0xFFF87171).copy(alpha = 0.5f)),
+                color = colors.error.copy(alpha = if (colors.isDark) 0.24f else 0.12f),
+                border = BorderStroke(1.dp, colors.error.copy(alpha = 0.55f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
                     text = error,
-                    color = Color(0xFFFEE2E2),
+                    color = colors.error,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(12.dp)
                 )

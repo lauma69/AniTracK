@@ -25,6 +25,7 @@ import com.example.model.CommunityCapacity
 import com.example.model.CommunityEmoji
 import com.example.model.CommunityMember
 import com.example.model.CommunityReview
+import com.example.model.DailyAnimeFormatters
 import com.example.model.DailyAnimePick
 import com.example.model.DatabaseStorageStats
 import com.example.model.FlatReplyTo
@@ -162,7 +163,11 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     private val _isDiscussionLoading = MutableStateFlow(false)
     val isDiscussionLoading = _isDiscussionLoading.asStateFlow()
 
-    // Community — Random Anime of the Day State (Backend-driven Supabase daily_anime)
+    // Community — Random Anime of the Day State (IST midnight reset + persistent cache)
+    private val dailyRandomPrefs = application.getSharedPreferences(
+        "au_daily_random_ist_prefs",
+        android.content.Context.MODE_PRIVATE
+    )
     private val _dailyRandomAnime = MutableStateFlow<DailyAnimePick?>(null)
     val dailyRandomAnime = _dailyRandomAnime.asStateFlow()
 
@@ -171,7 +176,9 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _dailyRandomError = MutableStateFlow<String?>(null)
     val dailyRandomError = _dailyRandomError.asStateFlow()
-    private var dailyRandomFetchedUtcDate: String? = null
+    private var dailyRandomFetchedIstDate: String? = null
+    private var dailyRandomLoadJob: Job? = null
+    private var dailyRandomMidnightWatcherJob: Job? = null
 
     // Community — Top Anime Catalogue State
     private val _topAnimeSource = MutableStateFlow(TopAnimeSource.ALL)
@@ -491,6 +498,8 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     private var notificationReconnectJob: Job? = null
 
     init {
+        restoreCachedDailyRandomForTodayIst()
+        startDailyRandomIstMidnightWatcher()
         restoreSessionAndInitialData()
         observeAuthSessionForNotifications()
         startAutoCloudSyncLoop()
@@ -3818,12 +3827,125 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     // COMMUNITY — RANDOM ANIME OF THE DAY & TOP ANIME CATALOGUE
     // ------------------------------------------------------------------------
 
+    private fun restoreCachedDailyRandomForTodayIst(): DailyAnimePick? {
+        val todayIst = DailyAnimeFormatters.getCurrentIstDateString()
+        val rawJson = dailyRandomPrefs.getString("daily_random_ist_v2", null) ?: return null
+        return runCatching {
+            val wrapper = org.json.JSONObject(rawJson)
+            val cachedIstDate = wrapper.optString("istDate", "")
+            val rowObj = wrapper.optJSONObject("row") ?: return@runCatching null
+            if (cachedIstDate != todayIst) return@runCatching null
+            val pick = supabaseDb.parseDailyAnimePickJson(rowObj)
+            if (DailyAnimeFormatters.isPickEligibleForDate(pick, todayIst)) {
+                _dailyRandomAnime.value = pick
+                dailyRandomFetchedIstDate = todayIst
+                pick
+            } else {
+                dailyRandomPrefs.edit().remove("daily_random_ist_v2").apply()
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun persistDailyRandomForTodayIst(pick: DailyAnimePick, istDate: String) {
+        if (!DailyAnimeFormatters.isPickEligibleForDate(pick, istDate)) return
+        runCatching {
+            val meta = org.json.JSONObject()
+                .put("anilist_id", pick.anilistId)
+                .put("title", org.json.JSONObject()
+                    .put("english", pick.title)
+                    .put("romaji", pick.secondaryTitle.ifBlank { pick.title })
+                )
+                .put("cover_image", pick.coverImage)
+                .put("banner_image", pick.bannerImage ?: org.json.JSONObject.NULL)
+                .put("average_score", pick.rating100 ?: 0)
+                .put("episodes", pick.episodes ?: org.json.JSONObject.NULL)
+                .put("start_date", pick.startDate ?: org.json.JSONObject.NULL)
+                .put("end_date", pick.endDate ?: org.json.JSONObject.NULL)
+                .put("status", pick.rawStatus ?: org.json.JSONObject.NULL)
+                .put("format", pick.rawFormat ?: org.json.JSONObject.NULL)
+                .put("season", pick.rawSeason ?: org.json.JSONObject.NULL)
+                .put("season_year", pick.releaseYear ?: org.json.JSONObject.NULL)
+                .put("genres", org.json.JSONArray(pick.genres))
+                .put("tags", org.json.JSONArray(pick.tags))
+                .put("description", pick.description)
+                .put("duration", pick.durationMinutes ?: org.json.JSONObject.NULL)
+                .put("source", pick.rawSource ?: org.json.JSONObject.NULL)
+                .put("country_of_origin", pick.countryOfOrigin ?: org.json.JSONObject.NULL)
+                .put("studios", org.json.JSONArray(pick.studios))
+                .put("trailer", org.json.JSONObject().put("id", pick.trailerId.orEmpty()).put("site", "youtube"))
+
+            val rowObj = org.json.JSONObject()
+                .put("id", pick.id)
+                .put("selection_date", istDate)
+                .put("anilist_id", pick.anilistId)
+                .put("title", pick.title)
+                .put("rating", pick.rating100 ?: 0)
+                .put("cover_image", pick.coverImage)
+                .put("banner_image", pick.bannerImage ?: org.json.JSONObject.NULL)
+                .put("trailer_id", pick.trailerId.orEmpty())
+                .put("anime_metadata", meta)
+
+            val wrapper = org.json.JSONObject()
+                .put("istDate", istDate)
+                .put("row", rowObj)
+            dailyRandomPrefs.edit().putString("daily_random_ist_v2", wrapper.toString()).apply()
+        }
+    }
+
+    private fun startDailyRandomIstMidnightWatcher() {
+        dailyRandomMidnightWatcherJob?.cancel()
+        dailyRandomMidnightWatcherJob = viewModelScope.launch {
+            while (isActive) {
+                val delayMs = DailyAnimeFormatters.millisUntilNextIstMidnight() + 350L
+                kotlinx.coroutines.delay(delayMs)
+                val newIstDate = DailyAnimeFormatters.getCurrentIstDateString()
+                if (dailyRandomFetchedIstDate != newIstDate ||
+                    !DailyAnimeFormatters.isPickEligibleForDate(_dailyRandomAnime.value, newIstDate)
+                ) {
+                    _dailyRandomAnime.value = null
+                    dailyRandomFetchedIstDate = null
+                    loadDailyRandomAnime(forceRefresh = false)
+                }
+            }
+        }
+    }
+
     fun loadDailyRandomAnime(forceRefresh: Boolean = false) {
-        val todayUtc = LocalDate.now(java.time.ZoneOffset.UTC).toString()
-        if (!forceRefresh && _dailyRandomAnime.value != null && dailyRandomFetchedUtcDate == todayUtc) {
+        val todayIst = DailyAnimeFormatters.getCurrentIstDateString()
+        val currentPick = _dailyRandomAnime.value
+
+        // If the IST date has rolled over or current in-memory pick is invalid, clear it immediately
+        if (currentPick != null && !DailyAnimeFormatters.isPickEligibleForDate(currentPick, todayIst)) {
+            _dailyRandomAnime.value = null
+            dailyRandomFetchedIstDate = null
+        }
+
+        // Do not reset or replace a valid recommendation already loaded for today's IST date
+        if (_dailyRandomAnime.value != null &&
+            dailyRandomFetchedIstDate == todayIst &&
+            DailyAnimeFormatters.isPickEligibleForDate(_dailyRandomAnime.value, todayIst) &&
+            _dailyRandomError.value == null
+        ) {
             return
         }
-        viewModelScope.launch {
+
+        // Check persistent local cache for today's IST date before making network requests
+        if (!forceRefresh || _dailyRandomAnime.value == null) {
+            val restored = restoreCachedDailyRandomForTodayIst()
+            if (restored != null && DailyAnimeFormatters.isPickEligibleForDate(restored, todayIst)) {
+                _dailyRandomError.value = null
+                _isDailyRandomLoading.value = false
+                return
+            }
+        }
+
+        // Prevent multiple simultaneous requests from generating conflicting recommendations
+        if (dailyRandomLoadJob?.isActive == true) {
+            return
+        }
+
+        dailyRandomLoadJob = viewModelScope.launch {
             _isDailyRandomLoading.value = true
             _dailyRandomError.value = null
 
@@ -3832,9 +3954,21 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
             }
             supabaseDb.fetchDailyRandomAnime(session)
                 .onSuccess { pick ->
-                    _dailyRandomAnime.value = pick
-                    dailyRandomFetchedUtcDate = todayUtc
-                    _dailyRandomError.value = null
+                    val activeIstDate = DailyAnimeFormatters.getCurrentIstDateString()
+                    if (DailyAnimeFormatters.isPickEligibleForDate(pick, activeIstDate) && pick != null) {
+                        _dailyRandomAnime.value = pick
+                        dailyRandomFetchedIstDate = activeIstDate
+                        _dailyRandomError.value = null
+                        persistDailyRandomForTodayIst(pick, activeIstDate)
+                    } else if (DailyAnimeFormatters.isPickEligibleForDate(pick) && pick != null) {
+                        val normalizedForToday = pick.copy(selectionDate = activeIstDate)
+                        _dailyRandomAnime.value = normalizedForToday
+                        dailyRandomFetchedIstDate = activeIstDate
+                        _dailyRandomError.value = null
+                        persistDailyRandomForTodayIst(normalizedForToday, activeIstDate)
+                    } else {
+                        _dailyRandomError.value = "Unable to load today's featured anime."
+                    }
                 }
                 .onFailure { err ->
                     _dailyRandomError.value = err.message ?: "Unable to load today's featured anime."

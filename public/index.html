@@ -1,14 +1,35 @@
 <!DOCTYPE html>
-<html lang="en" style="background-color:#09090f;">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Anime Universe — Track Anime &amp; Share Taste</title>
   <meta name="description" content="Track anime and donghua, follow weekly release schedules, rate with 5-star half-star precision, and share editorial review notes with the Anime Universe community." />
-  <meta name="theme-color" content="#09090f" />
+  <meta name="theme-color" content="#090B10" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Anime Universe" />
+  <script>
+    (function () {
+      try {
+        var raw = localStorage.getItem('anime_universe_prefs');
+        var prefs = raw ? JSON.parse(raw) : {};
+        var mode = String(prefs.themeMode || 'DARK').toUpperCase();
+        var eff = mode === 'LIGHT'
+          ? 'light'
+          : mode === 'SYSTEM'
+            ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+            : 'dark';
+        document.documentElement.setAttribute('data-theme', eff);
+        document.documentElement.setAttribute('data-accent', String(prefs.accentTheme || 'GOLD').toUpperCase());
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', eff === 'light' ? '#F5F6FA' : '#090B10');
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        document.documentElement.setAttribute('data-accent', 'GOLD');
+      }
+    })();
+  </script>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
@@ -16,11 +37,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css?v=2.27.0" />
+  <link rel="stylesheet" href="/styles.css?v=2.28.0" />
 </head>
-<body style="background-color:#09090f;">
+<body>
   <div id="app"></div>
   <script src="/assets-bundle.js"></script>
-  <script type="module" src="/app.js?v=2.27.0"></script>
+  <script type="module" src="/app.js?v=2.28.0"></script>
 </body>
 </html>

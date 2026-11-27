@@ -122,17 +122,30 @@ import com.example.viewmodel.AnimeViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val LivTrAkBg = Color(0xFF030304)
-private val LivTrAkSurface = Color(0xFF0E0E16)
-private val LivTrAkSurface2 = Color(0xFF14141E)
-private val FrostedMenuBg = Color(0xEB151524)
-private val FrostedMenuBorder = Color(0x3DE8C88F)
-private val LivTrAkGold = Color(0xFFE8C88F)
-private val LivTrAkGoldSoft = Color(0xFFF5E4BE)
-private val LivTrAkIvory = Color(0xFFF8F4EB)
-private val LivTrAkAsh = Color(0xFF9A9AA8)
-private val LivTrAkAsh2 = Color(0xFF66667A)
-private val LivTrAkHairline = Color(0x14FFFFFF)
+import androidx.compose.runtime.ReadOnlyComposable
+
+private val LivTrAkBg: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.backgroundMain
+private val LivTrAkSurface: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.cardBackground
+private val LivTrAkSurface2: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.elevatedSurface
+private val FrostedMenuBg: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.cardBackground.copy(alpha = 0.97f)
+private val FrostedMenuBorder: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.accentPrimary.copy(alpha = 0.34f)
+private val LivTrAkGold: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.accentPrimary
+private val LivTrAkGoldSoft: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.highlight
+private val LivTrAkIvory: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.textPrimary
+private val LivTrAkAsh: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.textSecondary
+private val LivTrAkAsh2: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.textMuted
+private val LivTrAkHairline: Color
+    @Composable @ReadOnlyComposable get() = AppTheme.colors.borderSubtle
 
 private val SOLO_EMOJI_BRACKET_REGEX = Regex("""^\[emoji:([a-zA-Z0-9_-]{1,64})]$""", RegexOption.IGNORE_CASE)
 private val SOLO_EMOJI_COLON_REGEX = Regex("""^:([a-zA-Z0-9][a-zA-Z0-9_-]{0,63}):$""", RegexOption.IGNORE_CASE)
@@ -893,14 +906,14 @@ fun AnimeDiscussionSection(
                             if (isSubmitting) {
                                 CircularProgressIndicator(
                                     strokeWidth = 2.dp,
-                                    color = LivTrAkBg,
+                                    color = colors.onAccentPrimary,
                                     modifier = Modifier.size(16.dp)
                                 )
                             } else {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.Send,
                                     contentDescription = "Send message",
-                                    tint = if (canSend) LivTrAkBg else LivTrAkAsh2,
+                                    tint = if (canSend) colors.onAccentPrimary else LivTrAkAsh2,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -969,15 +982,16 @@ private fun LivTrAkChatMessageItem(
     } else {
         RoundedCornerShape(topStart = 4.dp, topEnd = 18.dp, bottomEnd = 18.dp, bottomStart = 18.dp)
     }
+    val themeColors = AppTheme.colors
     val bubbleBg = when {
-        isHighlighted -> LivTrAkGold.copy(alpha = 0.24f)
-        isMine -> Color(0x26E8C88F)
-        else -> Color(0x0DFFFFFF)
+        isHighlighted -> themeColors.accentPrimary.copy(alpha = if (themeColors.isDark) 0.24f else 0.18f)
+        isMine -> themeColors.accentPrimary.copy(alpha = if (themeColors.isDark) 0.16f else 0.13f)
+        else -> if (themeColors.isDark) Color.White.copy(alpha = 0.055f) else themeColors.elevatedSurface.copy(alpha = 0.72f)
     }
     val bubbleBorder = when {
-        isHighlighted -> LivTrAkGold
-        isMine -> Color(0x4DE8C88F)
-        else -> LivTrAkHairline
+        isHighlighted -> themeColors.accentPrimary
+        isMine -> themeColors.accentPrimary.copy(alpha = if (themeColors.isDark) 0.34f else 0.38f)
+        else -> themeColors.borderSubtle
     }
 
     val soloEmojiId = remember(comment.content) { extractSoloEmojiId(comment.content) }
@@ -1273,9 +1287,14 @@ private fun FlatQuotedReplyPreviewCard(
         }
     }
 
+    val replySurfaceColor = if (AppTheme.colors.isDark) {
+        Color.White.copy(alpha = 0.08f)
+    } else {
+        AppTheme.colors.backgroundSecondary.copy(alpha = 0.92f)
+    }
     Surface(
         shape = RoundedCornerShape(9.dp),
-        color = Color(0x14FFFFFF),
+        color = replySurfaceColor,
         border = BorderStroke(1.dp, LivTrAkHairline),
         modifier = modifier
             .fillMaxWidth()
@@ -1401,7 +1420,8 @@ private fun RichChatMessageText(
         map
     }
 
-    val annotated = remember(content, emojiById, mentionColor, textColor) {
+    val fallbackEmojiColor = LivTrAkAsh
+    val annotated = remember(content, emojiById, mentionColor, textColor, fallbackEmojiColor) {
         buildAnnotatedString {
             var cursor = 0
             combinedRegex.findAll(content).forEach { match ->
@@ -1417,7 +1437,7 @@ private fun RichChatMessageText(
                         appendInlineContent("emoji_$emojiId", "✨")
                     }
                     emojiId != null -> {
-                        withStyle(SpanStyle(color = LivTrAkAsh, fontSize = 11.sp)) {
+                        withStyle(SpanStyle(color = fallbackEmojiColor, fontSize = 11.sp)) {
                             append(":$emojiId:")
                         }
                     }

@@ -10,6 +10,27 @@ const corsHeaders = {
 const ANILIST_ENDPOINT = "https://graphql.anilist.co";
 const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const MIN_ANILIST_SCORE = 60; // 6.0 / 10 minimum rating
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000; // Asia/Kolkata (UTC+05:30)
+
+const EXCLUDED_BL_GL_EXACT_TOKENS = new Set([
+  "bl",
+  "gl",
+  "yaoi",
+  "yuri",
+  "boys' love",
+  "boys love",
+  "boy's love",
+  "girls' love",
+  "girls love",
+  "girl's love",
+  "shounen ai",
+  "shonen ai",
+  "shoujo ai",
+  "shojo ai",
+]);
+
+const EXCLUDED_BL_GL_PHRASE_REGEX =
+  /(^|[^a-z0-9])(boys'?\s*love|boy's\s*love|girls'?\s*love|girl's\s*love|yaoi|yuri|shou?nen\s*ai|shou?jo\s*ai)([^a-z0-9]|$)/i;
 
 const ANILIST_DAILY_POOL_QUERY = `
 query ($page: Int!, $perPage: Int!, $sort: [MediaSort]) {
@@ -24,6 +45,8 @@ query ($page: Int!, $perPage: Int!, $sort: [MediaSort]) {
       type: ANIME
       isAdult: false
       averageScore_greater: 59
+      genre_not_in: ["Hentai", "Boys' Love", "Girls' Love", "Yaoi", "Yuri", "Shounen Ai", "Shoujo Ai"]
+      tag_not_in: ["Boys' Love", "Girls' Love", "Yuri", "Yaoi", "Shounen Ai", "Shoujo Ai"]
       sort: $sort
     ) {
       id
@@ -55,6 +78,10 @@ query ($page: Int!, $perPage: Int!, $sort: [MediaSort]) {
       season
       seasonYear
       genres
+      tags {
+        name
+        category
+      }
       description(asHtml: false)
       duration
       source
@@ -80,6 +107,11 @@ interface AniListFuzzyDate {
   day?: number | null;
 }
 
+interface AniListTagNode {
+  name?: string | null;
+  category?: string | null;
+}
+
 interface AniListMediaCandidate {
   id: number;
   title?: {
@@ -102,6 +134,7 @@ interface AniListMediaCandidate {
   season?: string | null;
   seasonYear?: number | null;
   genres?: string[] | null;
+  tags?: Array<AniListTagNode | string | null> | null;
   description?: string | null;
   duration?: number | null;
   source?: string | null;
@@ -125,8 +158,69 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-function getUtcDateString(now = new Date()): string {
-  return now.toISOString().slice(0, 10);
+function getIstDateString(now = new Date()): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+    const y = parts.find((p) => p.type === "year")?.value;
+    const m = parts.find((p) => p.type === "month")?.value;
+    const d = parts.find((p) => p.type === "day")?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {
+    // Fall back to fixed UTC+05:30 offset below
+  }
+  return new Date(now.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function isExcludedBlGlToken(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  const normalized = String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/[’‘`]/g, "'")
+    .replace(/[_\-]+/g, " ")
+    .replace(/\s+/g, " ");
+  if (!normalized) return false;
+  if (EXCLUDED_BL_GL_EXACT_TOKENS.has(normalized)) return true;
+  return EXCLUDED_BL_GL_PHRASE_REGEX.test(normalized);
+}
+
+function extractTagNames(tags?: Array<AniListTagNode | string | null> | null): string[] {
+  if (!Array.isArray(tags)) return [];
+  const result: string[] = [];
+  for (const t of tags) {
+    if (!t) continue;
+    if (typeof t === "string") {
+      const s = t.trim();
+      if (s) result.push(s);
+    } else if (typeof t === "object") {
+      const name = String(t.name ?? "").trim();
+      if (name) result.push(name);
+      const cat = String(t.category ?? "").trim();
+      if (cat && isExcludedBlGlToken(cat)) result.push(cat);
+    }
+  }
+  return result;
+}
+
+function hasExcludedBlGlGenreOrTag(
+  genres?: string[] | null,
+  tags?: Array<AniListTagNode | string | null> | null
+): boolean {
+  const cleanGenres = (genres ?? []).map((g) => String(g ?? "").trim()).filter(Boolean);
+  const cleanTags = extractTagNames(tags);
+  if (cleanGenres.length === 0 || cleanTags.length === 0) return true;
+  for (const g of cleanGenres) {
+    if (isExcludedBlGlToken(g)) return true;
+  }
+  for (const t of cleanTags) {
+    if (isExcludedBlGlToken(t)) return true;
+  }
+  return false;
 }
 
 function sanitizeDescription(raw: string | null | undefined): string {
@@ -307,6 +401,11 @@ function isCandidateMetadataValid(
   const cover = candidate.coverImage?.extraLarge?.trim() || candidate.coverImage?.large?.trim() || "";
   if (!cover || !/^https?:\/\//i.test(cover)) return false;
 
+  // Secondary validation: exclude BL, GL, Yaoi, Yuri, Shounen Ai, Shoujo Ai, and missing genre/tag metadata
+  if (hasExcludedBlGlGenreOrTag(candidate.genres, candidate.tags)) {
+    return false;
+  }
+
   return true;
 }
 
@@ -317,6 +416,7 @@ function buildStoredMetadata(candidate: AniListMediaCandidate, trailerId: string
   const genres = (candidate.genres ?? [])
     .map((g) => String(g).trim())
     .filter((g) => g.length > 0);
+  const tags = extractTagNames(candidate.tags);
 
   return {
     anilist_id: candidate.id,
@@ -337,6 +437,7 @@ function buildStoredMetadata(candidate: AniListMediaCandidate, trailerId: string
     season: candidate.season || null,
     season_year: candidate.seasonYear ?? candidate.startDate?.year ?? null,
     genres,
+    tags,
     description: sanitizeDescription(candidate.description),
     duration: typeof candidate.duration === "number" && candidate.duration > 0 ? candidate.duration : null,
     source: candidate.source || null,
@@ -409,25 +510,32 @@ serve(async (req: Request) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const todayUtc = getUtcDateString();
+  const todayIst = getIstDateString();
 
   try {
-    // 1. Idempotency check: return today's selection if already chosen
+    // 1. Idempotency check: return today's IST selection if already chosen and valid (non-BL/GL, score >= 60)
     const { data: existingToday, error: existingErr } = await adminClient
       .from("daily_anime")
       .select("*")
-      .eq("selection_date", todayUtc)
+      .eq("selection_date", todayIst)
       .maybeSingle();
 
     if (existingErr) {
       throw new Error("Failed to check existing daily selection.");
     }
 
-    if (existingToday) {
+    if (
+      existingToday &&
+      Number(existingToday.rating ?? 0) >= MIN_ANILIST_SCORE &&
+      !hasExcludedBlGlGenreOrTag(
+        existingToday?.anime_metadata?.genres,
+        existingToday?.anime_metadata?.tags
+      )
+    ) {
       return new Response(
         JSON.stringify({
           status: "already_selected",
-          selection_date: todayUtc,
+          selection_date: todayIst,
           anime: existingToday,
         }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -544,7 +652,7 @@ serve(async (req: Request) => {
       return new Response(
         JSON.stringify({
           status: "no_eligible_candidate",
-          selection_date: todayUtc,
+          selection_date: todayIst,
           fallback_preserved: Boolean(lastValid),
           last_valid_selection_date: lastValid?.selection_date ?? null,
         }),
@@ -565,7 +673,7 @@ serve(async (req: Request) => {
     const metadata = buildStoredMetadata(selectedCandidate, selectedTrailerId);
 
     const { data: savedRows, error: saveErr } = await adminClient.rpc("save_daily_anime_selection", {
-      p_selection_date: todayUtc,
+      p_selection_date: todayIst,
       p_anilist_id: selectedCandidate.id,
       p_title: displayTitle,
       p_rating: selectedCandidate.averageScore,
@@ -585,7 +693,7 @@ serve(async (req: Request) => {
     return new Response(
       JSON.stringify({
         status: "selected",
-        selection_date: todayUtc,
+        selection_date: todayIst,
         anime: saved,
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }

@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -220,8 +221,22 @@ fun CommunityScreen(
     var activeModalJumpTarget by remember { mutableStateOf<NotificationJumpTarget?>(null) }
     var forceLiveChatTab by remember { mutableStateOf(false) }
 
-    // Non-blocking preload of top frequently used custom emojis & latest Tagged You list when Community opens
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, activeSection) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.loadDailyRandomAnime(forceRefresh = false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Non-blocking preload of top frequently used custom emojis, latest Tagged You list, & IST daily pick check when Community opens
     LaunchedEffect(profile?.id) {
+        viewModel.loadDailyRandomAnime(forceRefresh = false)
         if (profile != null) {
             viewModel.loadCommunityEmojis()
             viewModel.refreshNotifications(reset = true)
@@ -627,12 +642,12 @@ fun CommunityScreen(
                     label = "community_tab_indicator_width"
                 )
                 val indicatorBgColor by animateColorAsState(
-                    targetValue = if (selectedIdx == 3) Color(0xFF332E4D) else colors.accentPrimary.copy(alpha = 0.22f),
+                    targetValue = colors.accentPrimary.copy(alpha = if (colors.isDark) 0.22f else 0.15f),
                     animationSpec = tween(220),
                     label = "community_tab_indicator_bg"
                 )
                 val indicatorBorderColor by animateColorAsState(
-                    targetValue = if (selectedIdx == 3) Color(0xFFA78BFA).copy(alpha = 0.72f) else colors.accentPrimary.copy(alpha = 0.72f),
+                    targetValue = colors.accentPrimary.copy(alpha = if (colors.isDark) 0.72f else 0.55f),
                     animationSpec = tween(220),
                     label = "community_tab_indicator_border"
                 )
@@ -803,14 +818,14 @@ fun CommunityScreen(
                                     Icon(
                                         imageVector = Icons.Filled.EmojiEvents,
                                         contentDescription = null,
-                                        tint = if (topActive) Color(0xFFC4B5FD) else Color(0xFFA78BFA),
+                                        tint = if (topActive) colors.highlight else colors.accentPrimary,
                                         modifier = Modifier.size(15.dp)
                                     )
                                     Spacer(modifier = Modifier.width(5.dp))
                                     Text(
                                         text = "Top",
                                         style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                        color = if (topActive) Color(0xFFC4B5FD) else colors.textSecondary,
+                                        color = if (topActive) colors.highlight else colors.textSecondary,
                                         maxLines = 1
                                     )
                                 }
@@ -1155,7 +1170,7 @@ fun CommunityScreen(
                                                             Text(
                                                                 text = "#${selIdx + 1}",
                                                                 style = TabularNumSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-                                                                color = Color(0xFF12151F),
+                                                                color = colors.onAccentPrimary,
                                                                 modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                                             )
                                                         }
@@ -1505,8 +1520,8 @@ internal fun CommunityAnimeTemplateCard(
                             if (group.isAdult) {
                                 Surface(
                                     shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFFEF4444).copy(alpha = 0.2f),
-                                    border = BorderStroke(1.dp, Color(0xFFEF4444)),
+                                    color = colors.error.copy(alpha = if (colors.isDark) 0.20f else 0.12f),
+                                    border = BorderStroke(1.dp, colors.error),
                                     modifier = Modifier.testTag("community_adult_badge_${group.animeId}")
                                 ) {
                                     Text(
@@ -1516,7 +1531,7 @@ internal fun CommunityAnimeTemplateCard(
                                             fontWeight = FontWeight.ExtraBold,
                                             letterSpacing = 0.4.sp
                                         ),
-                                        color = Color(0xFFFCA5A5),
+                                        color = colors.error,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
@@ -1526,7 +1541,7 @@ internal fun CommunityAnimeTemplateCard(
                                     modifier = Modifier
                                         .size(11.dp)
                                         .clip(CircleShape)
-                                        .background(Color(0xFFEF4444))
+                                        .background(colors.error)
                                         .border(1.5.dp, colors.cardBackground, CircleShape)
                                         .testTag("community_unseen_red_dot_${group.animeId}")
                                 )
@@ -1535,8 +1550,8 @@ internal fun CommunityAnimeTemplateCard(
                         if (unseenInfo != null) {
                             Surface(
                                 shape = CircleShape,
-                                color = Color(0xFFEF4444).copy(alpha = 0.14f),
-                                border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.45f))
+                                color = colors.error.copy(alpha = if (colors.isDark) 0.14f else 0.10f),
+                                border = BorderStroke(1.dp, colors.error.copy(alpha = 0.45f))
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
@@ -1547,14 +1562,14 @@ internal fun CommunityAnimeTemplateCard(
                                         modifier = Modifier
                                             .size(6.dp)
                                             .clip(CircleShape)
-                                            .background(Color(0xFFEF4444))
+                                            .background(colors.error)
                                     )
                                     val actionWord = if (unseenInfo.latestNotificationType == "reply") "replied" else "tagged you"
                                     val extra = if (unseenInfo.unseenCount > 1) " (+${unseenInfo.unseenCount - 1})" else ""
                                     Text(
                                         text = "${unseenInfo.latestSenderUsername} $actionWord$extra • Tap to open",
                                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
-                                        color = Color(0xFFFCA5A5),
+                                        color = colors.error,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -1992,7 +2007,7 @@ private fun UnseenTaggedAnimeCard(
                 Text(
                     text = "${unseen.latestSenderUsername} $actionLabel${if (unseen.unseenCount > 1) " • ${unseen.unseenCount} unseen" else ""}",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = Color(0xFFFCA5A5)
+                    color = colors.error
                 )
                 if (unseen.latestPreview.isNotBlank()) {
                     Text(
@@ -2129,10 +2144,10 @@ private fun TaggedYouCommunitySection(
                         }
                         Surface(
                             shape = RoundedCornerShape(20.dp),
-                            color = if (isUnread) Color(0xFF14141E) else colors.cardBackground,
+                            color = if (isUnread) colors.elevatedSurface else colors.cardBackground,
                             border = BorderStroke(
                                 1.dp,
-                                if (isUnread) Color(0xFFEF4444).copy(alpha = 0.55f) else colors.borderSubtle.copy(alpha = 0.55f)
+                                if (isUnread) colors.error.copy(alpha = 0.55f) else colors.borderSubtle.copy(alpha = 0.65f)
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -2219,7 +2234,7 @@ private fun TaggedYouCommunitySection(
                                         Text(
                                             text = "@${item.senderUsername} $actionWord",
                                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                                            color = if (isUnread) Color(0xFFF5E4BE) else colors.textSecondary,
+                                            color = if (isUnread) colors.highlight else colors.textSecondary,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
@@ -2325,8 +2340,8 @@ internal fun CommunityCommentsDialog(
     ) {
         Surface(
             shape = RoundedCornerShape(28.dp),
-            color = Color(0xFF030304),
-            border = BorderStroke(1.dp, Color(0x33E8C88F)),
+            color = colors.backgroundMain,
+            border = BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.34f)),
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 640.dp)
@@ -2335,7 +2350,7 @@ internal fun CommunityCommentsDialog(
                 .testTag("community_comments_dialog")
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // LivTrAk Hub Header: 60x86 Poster + COMMUNITY HUB Eyebrow + Cormorant Title + 18+ Badge + Close Circle
+                // Community Hub Header: 60x86 Poster + COMMUNITY HUB Eyebrow + Cormorant Title + 18+ Badge + Close Circle
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2361,7 +2376,7 @@ internal fun CommunityCommentsDialog(
                         Text(
                             text = "COMMUNITY HUB",
                             style = MicroUpperLabel.copy(fontSize = 8.5.sp, letterSpacing = 2.sp),
-                            color = Color(0xFFE8C88F)
+                            color = colors.accentPrimary
                         )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -2373,7 +2388,7 @@ internal fun CommunityCommentsDialog(
                                 fontSize = 21.sp,
                                 lineHeight = 23.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFFF8F4EB),
+                                color = colors.textPrimary,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false)
@@ -2381,8 +2396,8 @@ internal fun CommunityCommentsDialog(
                             if (group.isAdult) {
                                 Surface(
                                     shape = RoundedCornerShape(6.dp),
-                                    color = Color(0xFFEF4444).copy(alpha = 0.2f),
-                                    border = BorderStroke(1.dp, Color(0xFFEF4444))
+                                    color = colors.error.copy(alpha = if (colors.isDark) 0.2f else 0.12f),
+                                    border = BorderStroke(1.dp, colors.error)
                                 ) {
                                     Text(
                                         text = "18+",
@@ -2391,7 +2406,7 @@ internal fun CommunityCommentsDialog(
                                             fontWeight = FontWeight.ExtraBold,
                                             letterSpacing = 0.4.sp
                                         ),
-                                        color = Color(0xFFFCA5A5),
+                                        color = colors.error,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
@@ -2402,13 +2417,13 @@ internal fun CommunityCommentsDialog(
                         Text(
                             text = "${avgLabel}${memberCount} ${if (memberCount == 1) "member" else "members"}",
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.5.sp),
-                            color = Color(0xFF9A9AA8)
+                            color = colors.textSecondary
                         )
                     }
                     Surface(
                         shape = CircleShape,
-                        color = Color(0x14FFFFFF),
-                        border = BorderStroke(1.dp, Color(0x1AFFFFFF)),
+                        color = colors.elevatedSurface,
+                        border = BorderStroke(1.dp, colors.borderSubtle),
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
@@ -2419,14 +2434,14 @@ internal fun CommunityCommentsDialog(
                             Icon(
                                 imageVector = Icons.Filled.Close,
                                 contentDescription = "Close chat hub",
-                                tint = Color(0xFFF8F4EB),
+                                tint = colors.textPrimary,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
                     }
                 }
 
-                // LivTrAk Underlined Tabs: Live Chat | Reviews (N)
+                // Underlined Tabs: Live Chat | Reviews (N)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2450,14 +2465,14 @@ internal fun CommunityCommentsDialog(
                             Text(
                                 text = "Live Chat",
                                 style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-                                color = if (discussionActive) Color(0xFFE8C88F) else Color(0xFF9A9AA8)
+                                color = if (discussionActive) colors.accentPrimary else colors.textSecondary
                             )
                             if (hasUnseenDiscussion && !discussionActive) {
                                 Box(
                                     modifier = Modifier
                                         .size(7.dp)
                                         .clip(CircleShape)
-                                        .background(Color(0xFFEF4444))
+                                        .background(colors.error)
                                 )
                             }
                         }
@@ -2466,7 +2481,7 @@ internal fun CommunityCommentsDialog(
                             modifier = Modifier
                                 .width(68.dp)
                                 .height(2.dp)
-                                .background(if (discussionActive) Color(0xFFE8C88F) else Color.Transparent)
+                                .background(if (discussionActive) colors.accentPrimary else Color.Transparent)
                         )
                     }
 
@@ -2480,19 +2495,19 @@ internal fun CommunityCommentsDialog(
                         Text(
                             text = "Reviews (${group.reviews.size})",
                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-                            color = if (notesActive) Color(0xFFE8C88F) else Color(0xFF9A9AA8)
+                            color = if (notesActive) colors.accentPrimary else colors.textSecondary
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Box(
                             modifier = Modifier
                                 .width(78.dp)
                                 .height(2.dp)
-                                .background(if (notesActive) Color(0xFFE8C88F) else Color.Transparent)
+                                .background(if (notesActive) colors.accentPrimary else Color.Transparent)
                         )
                     }
                 }
 
-                HorizontalDivider(color = Color(0x14FFFFFF))
+                HorizontalDivider(color = colors.borderSubtle)
 
                 if (activeTab == "discussion") {
                     Box(

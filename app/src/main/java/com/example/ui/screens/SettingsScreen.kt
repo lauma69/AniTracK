@@ -7,11 +7,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +25,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,6 +42,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Info
@@ -76,7 +82,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
@@ -96,8 +105,16 @@ import com.example.model.WatchlistLayoutMode
 import com.example.ui.theme.AppRadius
 import com.example.ui.theme.AppSpacing
 import com.example.ui.theme.AppTheme
+import com.example.ui.theme.BuiltInAccentPresets
 import com.example.ui.theme.CormorantSerifFamily
+import com.example.ui.theme.DarkAppColors
+import com.example.ui.theme.LightAppColors
 import com.example.ui.theme.MicroUpperLabel
+import com.example.ui.theme.extractCustomAccentHex
+import com.example.ui.theme.normalizeAccentThemeKey
+import com.example.ui.theme.parseHexColor
+import com.example.ui.theme.resolveAccentPalette
+import com.example.ui.theme.sanitizeHexColor
 import com.example.ui.widgets.AppCard
 import com.example.ui.widgets.AppIconButton
 import com.example.ui.widgets.AppPrimaryButton
@@ -357,69 +374,12 @@ fun SettingsScreen(
                         }
 
                         SettingsCategory.APPEARANCE -> {
-                            LazyColumn(
-                                contentPadding = PaddingValues(
-                                    start = AppSpacing.md,
-                                    end = AppSpacing.md,
-                                    top = AppSpacing.xs,
-                                    bottom = 56.dp
-                                ),
-                                verticalArrangement = Arrangement.spacedBy(14.dp)
-                            ) {
-                                item {
-                                    SettingsSectionCard(title = "Appearance", icon = Icons.Filled.Palette) {
-                                        Text("Theme", style = MaterialTheme.typography.labelLarge, color = colors.textPrimary)
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)) {
-                                            ThemeModePreference.entries.forEach { mode ->
-                                                FilterChip(
-                                                    selected = preferences.themeMode == mode,
-                                                    onClick = { viewModel.setThemeMode(mode) },
-                                                    shape = CircleShape,
-                                                    colors = FilterChipDefaults.filterChipColors(
-                                                        selectedContainerColor = colors.accentPrimary.copy(alpha = 0.2f),
-                                                        selectedLabelColor = colors.highlight
-                                                    ),
-                                                    label = {
-                                                        Text(
-                                                            when (mode) {
-                                                                ThemeModePreference.DARK -> "Dark"
-                                                                ThemeModePreference.LIGHT -> "Light"
-                                                                ThemeModePreference.SYSTEM -> "System"
-                                                            }
-                                                        )
-                                                    }
-                                                )
-                                            }
-                                        }
-
-                                        Spacer(modifier = Modifier.height(AppSpacing.sm))
-                                        Text("Accent", style = MaterialTheme.typography.labelLarge, color = colors.textPrimary)
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        FlowRow(horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            listOf(
-                                                "CHAMPAGNE_GOLD" to "Champagne Gold",
-                                                "SAKURA_PINK" to "Sakura Rose",
-                                                "EMERALD_MINT" to "Emerald Mint",
-                                                "INDIGO_VIOLET" to "Midnight Indigo"
-                                            ).forEach { (key, label) ->
-                                                val selected = preferences.accentTheme == key ||
-                                                    (key == "CHAMPAGNE_GOLD" && preferences.accentTheme !in listOf("SAKURA_PINK", "EMERALD_MINT", "INDIGO_VIOLET"))
-                                                FilterChip(
-                                                    selected = selected,
-                                                    onClick = { viewModel.setAccentTheme(key) },
-                                                    shape = CircleShape,
-                                                    colors = FilterChipDefaults.filterChipColors(
-                                                        selectedContainerColor = colors.accentPrimary.copy(alpha = 0.2f),
-                                                        selectedLabelColor = colors.highlight
-                                                    ),
-                                                    label = { Text(label) }
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            AppearanceSettingsTabContent(
+                                themeMode = preferences.themeMode,
+                                accentTheme = preferences.accentTheme,
+                                onSelectThemeMode = { viewModel.setThemeMode(it) },
+                                onSelectAccentTheme = { viewModel.setAccentTheme(it) }
+                            )
                         }
 
                         SettingsCategory.PREFERENCES -> {
@@ -577,7 +537,7 @@ fun SettingsScreen(
                                             val pctFloat = (stats.usagePercent.toFloat() / 100f).coerceIn(0.01f, 1f)
                                             val barColor = when {
                                                 stats.usagePercent >= 85.0 -> colors.error
-                                                stats.usagePercent >= 60.0 -> Color(0xFFFFB74D)
+                                                stats.usagePercent >= 60.0 -> colors.warning
                                                 else -> colors.accentPrimary
                                             }
                                             Row(
@@ -913,3 +873,527 @@ private fun SettingsSwitchRow(
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
+
+private val QuickCustomAccentColors = listOf(
+    "#38BDF8" to "Sky",
+    "#F97316" to "Sunset",
+    "#F43F5E" to "Crimson",
+    "#14B8A6" to "Teal",
+    "#A855F7" to "Orchid",
+    "#EAB308" to "Amber"
+)
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AppearanceSettingsTabContent(
+    themeMode: ThemeModePreference,
+    accentTheme: String,
+    onSelectThemeMode: (ThemeModePreference) -> Unit,
+    onSelectAccentTheme: (String) -> Unit
+) {
+    val colors = AppTheme.colors
+    val normalizedAccent = remember(accentTheme) { normalizeAccentThemeKey(accentTheme) }
+    val customHex = remember(normalizedAccent) { extractCustomAccentHex(normalizedAccent) }
+    val isCustomSelected = customHex != null
+
+    var showCustomPicker by rememberSaveable(isCustomSelected) { mutableStateOf(isCustomSelected) }
+    var hexDraft by remember(customHex) { mutableStateOf(customHex ?: "#38BDF8") }
+    val parsedDraftColor = remember(hexDraft) { parseHexColor(hexDraft) }
+
+    val activeAccentLabel = remember(normalizedAccent, customHex) {
+        if (customHex != null) "Custom ($customHex)"
+        else BuiltInAccentPresets.firstOrNull { it.key == normalizedAccent }?.label ?: "Champagne Gold"
+    }
+
+    val darkAccentPreview = remember(normalizedAccent) { resolveAccentPalette(normalizedAccent, isDark = true).primary }
+    val lightAccentPreview = remember(normalizedAccent) { resolveAccentPalette(normalizedAccent, isDark = false).primary }
+
+    LazyColumn(
+        contentPadding = PaddingValues(
+            start = AppSpacing.md,
+            end = AppSpacing.md,
+            top = AppSpacing.xs,
+            bottom = 64.dp
+        ),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.testTag("appearance_settings_content")
+    ) {
+        // Section 1: Theme Selection with realistic visual preview cards
+        item(key = "appearance_theme_card") {
+            SettingsSectionCard(title = "Theme", icon = Icons.Filled.Palette) {
+                Text(
+                    text = "Choose how Anime Universe looks across every screen.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textSecondary
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ThemePreviewCard(
+                        mode = ThemeModePreference.DARK,
+                        label = "Dark",
+                        selected = themeMode == ThemeModePreference.DARK,
+                        darkAccent = darkAccentPreview,
+                        lightAccent = lightAccentPreview,
+                        onClick = { onSelectThemeMode(ThemeModePreference.DARK) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("theme_preview_card_dark")
+                    )
+                    ThemePreviewCard(
+                        mode = ThemeModePreference.LIGHT,
+                        label = "Light",
+                        selected = themeMode == ThemeModePreference.LIGHT,
+                        darkAccent = darkAccentPreview,
+                        lightAccent = lightAccentPreview,
+                        onClick = { onSelectThemeMode(ThemeModePreference.LIGHT) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("theme_preview_card_light")
+                    )
+                    ThemePreviewCard(
+                        mode = ThemeModePreference.SYSTEM,
+                        label = "System",
+                        selected = themeMode == ThemeModePreference.SYSTEM,
+                        darkAccent = darkAccentPreview,
+                        lightAccent = lightAccentPreview,
+                        onClick = { onSelectThemeMode(ThemeModePreference.SYSTEM) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("theme_preview_card_system")
+                    )
+                }
+            }
+        }
+
+        // Section 2: Accent Color Circular Swatches + Custom Color
+        item(key = "appearance_accent_card") {
+            SettingsSectionCard(title = "Accent Color", icon = Icons.Filled.ColorLens) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Highlights, buttons & active tabs",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textSecondary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Surface(
+                        shape = CircleShape,
+                        color = colors.accentPrimary.copy(alpha = if (colors.isDark) 0.18f else 0.12f),
+                        border = BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.4f))
+                    ) {
+                        Text(
+                            text = activeAccentLabel,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.highlight,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Evenly spaced circular swatches (4 built-in presets + Custom swatch)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    BuiltInAccentPresets.forEach { preset ->
+                        val isSelected = normalizedAccent == preset.key
+                        val displayColor = remember(preset.key, colors.isDark) {
+                            resolveAccentPalette(preset.key, colors.isDark).primary
+                        }
+                        AccentCircleSwatch(
+                            label = preset.label.substringBefore(" "),
+                            color = displayColor,
+                            selected = isSelected,
+                            onClick = {
+                                showCustomPicker = false
+                                onSelectAccentTheme(preset.key)
+                            },
+                            modifier = Modifier.testTag("accent_swatch_${preset.key.lowercase()}")
+                        )
+                    }
+
+                    // Custom color circular swatch
+                    val customSwatchColor = if (customHex != null) {
+                        parseHexColor(customHex) ?: colors.accentPrimary
+                    } else null
+                    AccentCircleSwatch(
+                        label = "Custom",
+                        color = customSwatchColor,
+                        isRainbowPlaceholder = customSwatchColor == null,
+                        selected = isCustomSelected || showCustomPicker,
+                        onClick = { showCustomPicker = !showCustomPicker },
+                        modifier = Modifier.testTag("accent_swatch_custom")
+                    )
+                }
+
+                AnimatedVisibility(visible = showCustomPicker) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        HorizontalDivider(color = colors.borderSubtle)
+                        Text(
+                            text = "Custom Color",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = colors.textPrimary
+                        )
+
+                        // Curated quick-pick custom swatches
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            QuickCustomAccentColors.forEach { (hex, name) ->
+                                val swatchColor = parseHexColor(hex) ?: colors.accentPrimary
+                                val isActive = customHex.equals(hex, ignoreCase = true)
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(CircleShape)
+                                        .border(
+                                            width = if (isActive) 2.5.dp else 1.dp,
+                                            color = if (isActive) colors.textPrimary else colors.borderSubtle,
+                                            shape = CircleShape
+                                        )
+                                        .padding(3.dp)
+                                        .clip(CircleShape)
+                                        .background(swatchColor)
+                                        .clickable {
+                                            hexDraft = hex
+                                            onSelectAccentTheme("CUSTOM:$hex")
+                                        }
+                                        .testTag("custom_accent_quick_${name.lowercase()}")
+                                ) {
+                                    if (isActive) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Check,
+                                            contentDescription = "$name selected",
+                                            tint = if (swatchColor.luminance() > 0.45f) Color(0xFF101218) else Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Hex Input + Live Preview + Apply
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(parsedDraftColor ?: colors.elevatedSurface)
+                                    .border(1.5.dp, colors.borderStrong, CircleShape)
+                            )
+                            OutlinedTextField(
+                                value = hexDraft,
+                                onValueChange = { input ->
+                                    val filtered = input.uppercase().filter { it == '#' || it in '0'..'9' || it in 'A'..'F' }.take(7)
+                                    hexDraft = if (filtered.isNotEmpty() && !filtered.startsWith("#")) "#$filtered" else filtered
+                                },
+                                label = { Text("Hex Code") },
+                                placeholder = { Text("#38BDF8") },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("custom_accent_hex_input")
+                            )
+                            Button(
+                                onClick = {
+                                    sanitizeHexColor(hexDraft)?.let { validHex ->
+                                        hexDraft = validHex
+                                        onSelectAccentTheme("CUSTOM:$validHex")
+                                    }
+                                },
+                                enabled = parsedDraftColor != null,
+                                shape = CircleShape,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = colors.accentPrimary,
+                                    contentColor = colors.onAccentPrimary
+                                ),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("custom_accent_apply_button")
+                            ) {
+                                Text("Apply", fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThemePreviewCard(
+    mode: ThemeModePreference,
+    label: String,
+    selected: Boolean,
+    darkAccent: Color,
+    lightAccent: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = AppTheme.colors
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = if (selected) colors.accentPrimary.copy(alpha = if (colors.isDark) 0.14f else 0.10f) else colors.backgroundSecondary,
+        border = BorderStroke(
+            width = if (selected) 2.dp else 1.dp,
+            color = if (selected) colors.accentPrimary else colors.borderSubtle
+        ),
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Realistic miniature app UI preview
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(74.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .border(1.dp, colors.borderSubtle, RoundedCornerShape(12.dp))
+            ) {
+                when (mode) {
+                    ThemeModePreference.DARK -> MiniThemePreviewCanvas(
+                        bg = DarkAppColors.backgroundMain,
+                        surface = DarkAppColors.cardBackground,
+                        textPrimary = DarkAppColors.textPrimary,
+                        textMuted = DarkAppColors.textMuted,
+                        accent = darkAccent
+                    )
+                    ThemeModePreference.LIGHT -> MiniThemePreviewCanvas(
+                        bg = LightAppColors.backgroundMain,
+                        surface = LightAppColors.cardBackground,
+                        textPrimary = LightAppColors.textPrimary,
+                        textMuted = LightAppColors.textMuted,
+                        accent = lightAccent
+                    )
+                    ThemeModePreference.SYSTEM -> Row(modifier = Modifier.fillMaxSize()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            MiniThemePreviewCanvas(
+                                bg = DarkAppColors.backgroundMain,
+                                surface = DarkAppColors.cardBackground,
+                                textPrimary = DarkAppColors.textPrimary,
+                                textMuted = DarkAppColors.textMuted,
+                                accent = darkAccent
+                            )
+                        }
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            MiniThemePreviewCanvas(
+                                bg = LightAppColors.backgroundMain,
+                                surface = LightAppColors.cardBackground,
+                                textPrimary = LightAppColors.textPrimary,
+                                textMuted = LightAppColors.textMuted,
+                                accent = lightAccent
+                            )
+                        }
+                    }
+                }
+
+                if (selected) {
+                    Surface(
+                        shape = CircleShape,
+                        color = colors.accentPrimary,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(5.dp)
+                            .size(18.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = "$label selected",
+                                tint = colors.onAccentPrimary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                ),
+                color = if (selected) colors.highlight else colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun MiniThemePreviewCanvas(
+    bg: Color,
+    surface: Color,
+    textPrimary: Color,
+    textMuted: Color,
+    accent: Color
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(bg)
+            .padding(7.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        // Mini top title bar + accent dot
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.55f)
+                    .height(5.dp)
+                    .clip(CircleShape)
+                    .background(textPrimary.copy(alpha = 0.85f))
+            )
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(accent)
+            )
+        }
+        // Mini card
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(7.dp))
+                .background(surface)
+                .padding(5.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.82f)
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(textPrimary.copy(alpha = 0.72f))
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.58f)
+                        .height(3.5.dp)
+                        .clip(CircleShape)
+                        .background(textMuted.copy(alpha = 0.55f))
+                )
+            }
+            // Mini accent action pill
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.52f)
+                    .height(6.dp)
+                    .clip(CircleShape)
+                    .background(accent)
+            )
+        }
+    }
+}
+
+@Composable
+private fun AccentCircleSwatch(
+    label: String,
+    color: Color?,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isRainbowPlaceholder: Boolean = false
+) {
+    val colors = AppTheme.colors
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .pointerHoverIcon(PointerIcon.Hand)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 2.dp, vertical = 2.dp)
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .border(
+                    width = if (selected) 2.5.dp else 1.dp,
+                    color = if (selected) colors.textPrimary else colors.borderSubtle,
+                    shape = CircleShape
+                )
+                .padding(4.dp)
+                .clip(CircleShape)
+                .then(
+                    if (isRainbowPlaceholder || color == null) {
+                        Modifier.background(
+                            Brush.sweepGradient(
+                                listOf(
+                                    Color(0xFFF43F5E),
+                                    Color(0xFFF59E0B),
+                                    Color(0xFF10B981),
+                                    Color(0xFF38BDF8),
+                                    Color(0xFF8B5CF6),
+                                    Color(0xFFF43F5E)
+                                )
+                            )
+                        )
+                    } else {
+                        Modifier.background(color)
+                    }
+                )
+        ) {
+            if (selected) {
+                val iconTint = if (color != null && color.luminance() > 0.45f) Color(0xFF101218) else Color.White
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = "$label selected",
+                    tint = iconTint,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 10.5.sp,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+            ),
+            color = if (selected) colors.highlight else colors.textSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+

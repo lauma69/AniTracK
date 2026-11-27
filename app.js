@@ -778,6 +778,7 @@ const state = {
   prefs: {
     themeMode: savedPrefs.themeMode || 'DARK',
     accentTheme: savedPrefs.accentTheme || 'GOLD',
+    customAccentHex: savedPrefs.customAccentHex || '#38BDF8',
     watchlistLayout: savedPrefs.watchlistLayout || 'GRID',
     titleLanguage: savedPrefs.titleLanguage || 'ENGLISH',
     showAdultContent: Boolean(savedPrefs.showAdultContent),
@@ -1006,17 +1007,200 @@ const state = {
 
 const syncedCatalogHashes = new Map();
 
-function applyTheme() {
-  const mode = state.prefs.themeMode;
-  let effective = 'dark';
-  if (mode === 'LIGHT') effective = 'light';
-  else if (mode === 'SYSTEM') {
-    effective = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-  }
-  document.documentElement.setAttribute('data-theme', effective);
-  document.documentElement.setAttribute('data-accent', state.prefs.accentTheme || 'GOLD');
+const WEB_ACCENT_PRESETS = [
+  { id: 'GOLD', label: 'Champagne Gold', shortLabel: 'Gold', darkHex: '#D8B778', lightHex: '#9A670E' },
+  { id: 'ROSE', label: 'Sakura Rose', shortLabel: 'Rose', darkHex: '#F48FB1', lightHex: '#AD2E75' },
+  { id: 'EMERALD', label: 'Emerald Mint', shortLabel: 'Mint', darkHex: '#5CE098', lightHex: '#127A4E' },
+  { id: 'INDIGO', label: 'Midnight Indigo', shortLabel: 'Indigo', darkHex: '#93A8FF', lightHex: '#4F3ED4' }
+];
+const WEB_CUSTOM_QUICK_HEXES = ['#38BDF8', '#F97316', '#A855F7', '#EF4444', '#14B8A6', '#EAB308'];
+
+function normalizeWebAccentKey(raw) {
+  const k = String(raw || 'GOLD').trim().toUpperCase();
+  if (k === 'CHAMPAGNE_GOLD' || k === 'COSMIC_CYAN' || k === 'GOLD') return 'GOLD';
+  if (k === 'SAKURA_PINK' || k === 'ROSE') return 'ROSE';
+  if (k === 'EMERALD_MINT' || k === 'EMERALD') return 'EMERALD';
+  if (k === 'INDIGO_VIOLET' || k === 'INDIGO') return 'INDIGO';
+  if (k === 'CUSTOM' || k.startsWith('CUSTOM:')) return 'CUSTOM';
+  return 'GOLD';
 }
+
+function sanitizeWebHexColor(raw) {
+  const cleaned = String(raw || '').trim().replace(/^#/, '');
+  const expanded =
+    cleaned.length === 3
+      ? cleaned.split('').map((c) => c + c).join('')
+      : cleaned;
+  return /^[0-9A-Fa-f]{6}$/.test(expanded) ? `#${expanded.toUpperCase()}` : null;
+}
+
+function hexToRgbObj(hex) {
+  const safe = sanitizeWebHexColor(hex) || '#38BDF8';
+  return {
+    r: parseInt(safe.slice(1, 3), 16),
+    g: parseInt(safe.slice(3, 5), 16),
+    b: parseInt(safe.slice(5, 7), 16)
+  };
+}
+
+function rgbToHexStr(r, g, b) {
+  const toHex = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0').toUpperCase();
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function rgbToHslObj(r, g, b) {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const d = max - min;
+  let h = 0;
+  const l = (max + min) / 2;
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  if (d !== 0) {
+    if (max === rn) h = ((gn - bn) / d) % 6;
+    else if (max === gn) h = (bn - rn) / d + 2;
+    else h = (rn - gn) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s, l };
+}
+
+function hslToRgbObj(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r1 = 0, g1 = 0, b1 = 0;
+  if (h < 60) { r1 = c; g1 = x; }
+  else if (h < 120) { r1 = x; g1 = c; }
+  else if (h < 180) { g1 = c; b1 = x; }
+  else if (h < 240) { g1 = x; b1 = c; }
+  else if (h < 300) { r1 = x; b1 = c; }
+  else { r1 = c; b1 = x; }
+  return {
+    r: Math.round((r1 + m) * 255),
+    g: Math.round((g1 + m) * 255),
+    b: Math.round((b1 + m) * 255)
+  };
+}
+
+function pickAccessibleOnAccentHex(r, g, b) {
+  const lin = (v) => {
+    const n = v / 255;
+    return n <= 0.03928 ? n / 12.92 : Math.pow((n + 0.055) / 1.055, 2.4);
+  };
+  const lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  return lum > 0.36 ? '#12141A' : '#FFFFFF';
+}
+
+function computeCustomAccentTokens(hex, isDark) {
+  const baseRgb = hexToRgbObj(hex);
+  const { h, s, l } = rgbToHslObj(baseRgb.r, baseRgb.g, baseRgb.b);
+  const sat = s < 0.08 ? s : Math.max(0.45, Math.min(0.92, s));
+  const primaryL = isDark
+    ? Math.max(0.64, Math.min(0.78, l < 0.56 ? 0.70 : l))
+    : Math.max(0.32, Math.min(0.44, l > 0.48 ? 0.39 : l));
+  const secondaryL = isDark ? Math.max(0.44, primaryL - 0.16) : Math.max(0.24, primaryL - 0.08);
+  const highlightL = isDark ? Math.min(0.90, primaryL + 0.14) : Math.max(0.22, primaryL - 0.09);
+
+  const pRgb = hslToRgbObj(h, sat, primaryL);
+  const sRgb = hslToRgbObj(h, Math.min(0.92, sat + 0.04), secondaryL);
+  const hRgb = hslToRgbObj(h, Math.min(0.95, sat + 0.02), highlightL);
+
+  return {
+    rgb: `${pRgb.r}, ${pRgb.g}, ${pRgb.b}`,
+    primary: rgbToHexStr(pRgb.r, pRgb.g, pRgb.b),
+    secondary: rgbToHexStr(sRgb.r, sRgb.g, sRgb.b),
+    highlight: rgbToHexStr(hRgb.r, hRgb.g, hRgb.b),
+    onAccent: pickAccessibleOnAccentHex(pRgb.r, pRgb.g, pRgb.b)
+  };
+}
+
+function getEffectiveWebThemeMode() {
+  const mode = state.prefs.themeMode || 'DARK';
+  if (mode === 'LIGHT') return 'light';
+  if (mode === 'SYSTEM') {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  return 'dark';
+}
+
+function getActiveAccentDisplayInfo() {
+  const key = normalizeWebAccentKey(state.prefs.accentTheme);
+  if (key === 'CUSTOM') {
+    const hex = sanitizeWebHexColor(state.prefs.customAccentHex) || '#38BDF8';
+    const darkTok = computeCustomAccentTokens(hex, true);
+    const lightTok = computeCustomAccentTokens(hex, false);
+    return {
+      key: 'CUSTOM',
+      label: `Custom (${hex})`,
+      darkHex: darkTok.primary,
+      lightHex: lightTok.primary,
+      rawHex: hex
+    };
+  }
+  const preset = WEB_ACCENT_PRESETS.find((p) => p.id === key) || WEB_ACCENT_PRESETS[0];
+  return {
+    key: preset.id,
+    label: preset.label,
+    darkHex: preset.darkHex,
+    lightHex: preset.lightHex,
+    rawHex: preset.darkHex
+  };
+}
+
+function applyTheme() {
+  const root = document.documentElement;
+  const effective = getEffectiveWebThemeMode();
+  const accentKey = normalizeWebAccentKey(state.prefs.accentTheme);
+  state.prefs.accentTheme = accentKey;
+  if (sanitizeWebHexColor(state.prefs.customAccentHex)) {
+    state.prefs.customAccentHex = sanitizeWebHexColor(state.prefs.customAccentHex);
+  } else {
+    state.prefs.customAccentHex = '#38BDF8';
+  }
+
+  root.setAttribute('data-theme', effective);
+  root.setAttribute('data-accent', accentKey);
+
+  const customProps = ['--accent-rgb', '--accent-primary', '--accent-secondary', '--highlight', '--on-accent'];
+  if (accentKey === 'CUSTOM') {
+    const tok = computeCustomAccentTokens(state.prefs.customAccentHex, effective === 'dark');
+    root.style.setProperty('--accent-rgb', tok.rgb);
+    root.style.setProperty('--accent-primary', tok.primary);
+    root.style.setProperty('--accent-secondary', tok.secondary);
+    root.style.setProperty('--highlight', tok.highlight);
+    root.style.setProperty('--on-accent', tok.onAccent);
+  } else {
+    customProps.forEach((prop) => root.style.removeProperty(prop));
+  }
+
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) {
+    themeMeta.setAttribute('content', effective === 'light' ? '#F5F6FA' : '#090B10');
+  }
+}
+
 applyTheme();
+
+if (window.matchMedia) {
+  const sysMedia = window.matchMedia('(prefers-color-scheme: light)');
+  const onSysThemeChange = () => {
+    if (state.prefs.themeMode === 'SYSTEM') {
+      applyTheme();
+      if (state.tab === 'settings' && state.settingsCategory === 'APPEARANCE') {
+        renderApp();
+      }
+    }
+  };
+  if (typeof sysMedia.addEventListener === 'function') {
+    sysMedia.addEventListener('change', onSysThemeChange);
+  } else if (typeof sysMedia.addListener === 'function') {
+    sysMedia.addListener(onSysThemeChange);
+  }
+}
 
 function savePrefs() {
   localStorage.setItem('anime_universe_prefs', JSON.stringify(state.prefs));
@@ -3730,16 +3914,173 @@ async function fetchAniListSeasonBatch(ids) {
 // COMMUNITY — RANDOM ANIME OF THE DAY & TOP ANIME CATALOGUE
 // ============================================================================
 
-const DAILY_RANDOM_CACHE_KEY = 'au_daily_random_anime_v1';
+const DAILY_RANDOM_CACHE_KEY = 'au_daily_random_anime_v2_ist';
+const LEGACY_DAILY_RANDOM_CACHE_KEY = 'au_daily_random_anime_v1';
 const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000; // UTC+05:30 (Asia/Kolkata, no DST)
 const topAnimeCatalogCache = new Map();
 
+const EXCLUDED_ANILIST_GENRES_WEB = [
+  'Hentai',
+  "Boys' Love",
+  "Girls' Love",
+  'Yaoi',
+  'Yuri',
+  'Shounen Ai',
+  'Shoujo Ai'
+];
+
+const EXCLUDED_ANILIST_TAGS_WEB = [
+  "Boys' Love",
+  "Girls' Love",
+  'Yuri',
+  'Yaoi',
+  'Shounen Ai',
+  'Shoujo Ai'
+];
+
+const EXCLUDED_BL_GL_EXACT_TOKENS_WEB = new Set([
+  'bl',
+  'gl',
+  'yaoi',
+  'yuri',
+  "boys' love",
+  'boys love',
+  "boy's love",
+  "girls' love",
+  'girls love',
+  "girl's love",
+  'shounen ai',
+  'shonen ai',
+  'shoujo ai',
+  'shojo ai'
+]);
+
+const EXCLUDED_BL_GL_PHRASE_RE_WEB =
+  /(^|[^a-z0-9])(boys'?\s*love|boy's\s*love|girls'?\s*love|girl's\s*love|yaoi|yuri|shou?nen\s*ai|shou?jo\s*ai)([^a-z0-9]|$)/i;
+
+function getIstDateKey(date = new Date()) {
+  const d = date instanceof Date ? date : new Date(date);
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(d);
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const day = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && day) {
+      return `${y}-${m}-${day}`;
+    }
+  } catch (_) {}
+  const istShifted = new Date(d.getTime() + IST_OFFSET_MS);
+  return istShifted.toISOString().slice(0, 10);
+}
+
+// Keep getUtcDateKey as an alias to getIstDateKey for any callers expecting the daily key
 function getUtcDateKey(date = new Date()) {
-  return date.toISOString().slice(0, 10);
+  return getIstDateKey(date);
+}
+
+function getMillisUntilNextIstMidnight(nowMs = Date.now()) {
+  const istElapsedToday = ((nowMs + IST_OFFSET_MS) % 86400000 + 86400000) % 86400000;
+  return Math.max(1000, 86400000 - istElapsedToday);
 }
 
 function isValidYouTubeVideoId(id) {
   return typeof id === 'string' && YOUTUBE_VIDEO_ID_RE.test(id.trim());
+}
+
+function isValidYouTubeId(id) {
+  return isValidYouTubeVideoId(id);
+}
+
+function isExcludedBlGlTokenWeb(raw) {
+  if (raw === null || raw === undefined) return false;
+  const normalized = String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/[’‘`]/g, "'")
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (!normalized) return false;
+  if (EXCLUDED_BL_GL_EXACT_TOKENS_WEB.has(normalized)) return true;
+  return EXCLUDED_BL_GL_PHRASE_RE_WEB.test(normalized);
+}
+
+function extractTagNamesWeb(tagsInput) {
+  if (!Array.isArray(tagsInput)) return [];
+  const out = [];
+  for (const item of tagsInput) {
+    if (!item) continue;
+    if (typeof item === 'string') {
+      const s = item.trim();
+      if (s) out.push(s);
+    } else if (typeof item === 'object') {
+      const name = String(item.name || '').trim();
+      if (name) out.push(name);
+      const category = String(item.category || '').trim();
+      if (category && isExcludedBlGlTokenWeb(category)) {
+        out.push(category);
+      }
+    }
+  }
+  return out;
+}
+
+function extractGenreNamesWeb(genresInput) {
+  if (!Array.isArray(genresInput)) return [];
+  return genresInput
+    .map((g) => String(g || '').trim())
+    .filter(Boolean);
+}
+
+function hasExcludedBlGlGenreOrTagWeb(genresInput, tagsInput) {
+  const genres = extractGenreNamesWeb(genresInput);
+  const tags = extractTagNamesWeb(tagsInput);
+  // If genre or tag metadata is missing or empty, skip the anime rather than risk recommending an excluded category
+  if (genres.length === 0 || tags.length === 0) return true;
+  for (const g of genres) {
+    if (isExcludedBlGlTokenWeb(g)) return true;
+  }
+  for (const t of tags) {
+    if (isExcludedBlGlTokenWeb(t)) return true;
+  }
+  return false;
+}
+
+function isDailyAnimeRowEligibleWeb(row, expectedIstDate = null) {
+  if (!row || typeof row !== 'object') return false;
+  const meta = row.anime_metadata && typeof row.anime_metadata === 'object' ? row.anime_metadata : {};
+  const anilistId = Number(row.anilist_id || meta.anilist_id || 0);
+  if (!Number.isFinite(anilistId) || anilistId <= 0) return false;
+
+  const ratingInt = Number(row.rating ?? meta.average_score ?? 0);
+  if (!Number.isFinite(ratingInt) || ratingInt < 60 || ratingInt > 100) return false;
+
+  const titleObj = meta.title && typeof meta.title === 'object' ? meta.title : {};
+  const displayTitle = String(
+    row.title || titleObj.english || titleObj.romaji || titleObj.native || ''
+  ).trim();
+  if (!displayTitle || displayTitle === 'Unknown') return false;
+
+  const coverImage = String(row.cover_image || meta.cover_image || '').trim();
+  if (!/^https?:\/\//i.test(coverImage)) return false;
+
+  const trailerId = String(row.trailer_id || meta?.trailer?.id || '').trim();
+  if (!isValidYouTubeVideoId(trailerId)) return false;
+
+  const genres = extractGenreNamesWeb(meta.genres);
+  const tags = extractTagNamesWeb(meta.tags);
+  if (genres.length === 0 || tags.length === 0) return false;
+  if (hasExcludedBlGlGenreOrTagWeb(genres, tags)) return false;
+
+  if (expectedIstDate && String(row.selection_date || '') !== expectedIstDate) {
+    return false;
+  }
+  return true;
 }
 
 function formatAiringStatusLabel(status) {
@@ -3858,9 +4199,13 @@ function normalizeDailyAnimeRow(row) {
   if (!row || typeof row !== 'object') return null;
   const meta = row.anime_metadata && typeof row.anime_metadata === 'object' ? row.anime_metadata : {};
   const ratingInt = Number(row.rating ?? meta.average_score ?? 0);
+  if (!Number.isFinite(ratingInt) || ratingInt < 60 || ratingInt > 100) return null;
   const trailerId = String(row.trailer_id || meta?.trailer?.id || '').trim();
   const studiosRaw = Array.isArray(meta.studios) ? meta.studios.filter(Boolean) : [];
-  const genresRaw = Array.isArray(meta.genres) ? meta.genres.filter(Boolean) : [];
+  const genresRaw = extractGenreNamesWeb(meta.genres);
+  const tagsRaw = extractTagNamesWeb(meta.tags);
+  if (hasExcludedBlGlGenreOrTagWeb(genresRaw, tagsRaw)) return null;
+
   const titleObj = meta.title && typeof meta.title === 'object' ? meta.title : {};
   const displayTitle =
     String(row.title || titleObj.english || titleObj.romaji || titleObj.native || '').trim() || 'Unknown';
@@ -3895,6 +4240,7 @@ function normalizeDailyAnimeRow(row) {
     studiosLabel: studiosRaw.length > 0 ? studiosRaw.join(', ') : 'Unknown',
     countryLabel: meta.country_of_origin ? String(meta.country_of_origin) : 'Unknown',
     genres: genresRaw,
+    tags: tagsRaw,
     description: stripAnimeHtml(meta.description || '')
   };
 }
@@ -3908,7 +4254,11 @@ function switchCommunityViewTab(rawNext) {
   const next = COMMUNITY_TAB_ORDER.includes(rawNext) ? rawNext : 'feed';
   const prev = COMMUNITY_TAB_ORDER.includes(state.communityViewTab) ? state.communityViewTab : 'feed';
   if (next === prev) {
-    if (next === 'random' && !state.dailyRandom.data && !state.dailyRandom.loading) {
+    if (
+      next === 'random' &&
+      (!state.dailyRandom.data || state.dailyRandom.fetchedDate !== getIstDateKey()) &&
+      !state.dailyRandom.loading
+    ) {
       loadDailyRandomAnime(false);
     } else if (next === 'top' && state.topAnime.items.length === 0 && !state.topAnime.loading) {
       loadTopAnimeCatalog(false);
@@ -3976,7 +4326,7 @@ function formatFuzzyDateNode(obj) {
 }
 
 async function isYouTubeTrailerEmbeddableWeb(videoId) {
-  if (!isValidYouTubeId(videoId)) return false;
+  if (!isValidYouTubeVideoId(videoId)) return false;
   try {
     const resp = await fetch(
       `https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}&format=json`,
@@ -3994,8 +4344,8 @@ async function isYouTubeTrailerEmbeddableWeb(videoId) {
   }
 }
 
-async function pickAutomaticDailyAnimeRowWeb(todayUtc, excludedIds) {
-  const prng = createDailyUtcPrng(`anime-universe-daily-pick-v1:${todayUtc}`);
+async function pickAutomaticDailyAnimeRowWeb(todayIst, excludedIds) {
+  const prng = createDailyUtcPrng(`anime-universe-daily-ist-v2:${todayIst}`);
   const pagePool = Array.from({ length: 32 }, (_, i) => i + 1);
   for (let i = pagePool.length - 1; i >= 1; i--) {
     const j = prng.nextInt(i + 1);
@@ -4012,7 +4362,9 @@ query ($page: Int!, $perPage: Int!) {
       isAdult: false,
       averageScore_greater: 59,
       status_in: [FINISHED, RELEASING],
-      sort: [POPULARITY_DESC]
+      genre_not_in: ["Hentai", "Boys' Love", "Girls' Love", "Yaoi", "Yuri", "Shounen Ai", "Shoujo Ai"],
+      tag_not_in: ["Boys' Love", "Girls' Love", "Yuri", "Yaoi", "Shounen Ai", "Shoujo Ai"],
+      sort: [POPULARITY_DESC, ID]
     ) {
       id
       title { english romaji native }
@@ -4027,6 +4379,7 @@ query ($page: Int!, $perPage: Int!) {
       season
       seasonYear
       genres
+      tags { name category }
       description(asHtml: false)
       duration
       source
@@ -4038,7 +4391,7 @@ query ($page: Int!, $perPage: Int!) {
 }
 `;
 
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     const page = pagePool[attempt % pagePool.length];
     let mediaList = [];
     try {
@@ -4060,9 +4413,14 @@ query ($page: Int!, $perPage: Int!) {
       if (!id || excludedIds.has(id) || score < 60 || score > 100) return false;
       const title = m?.title?.english || m?.title?.romaji || m?.title?.native || '';
       const cover = m?.coverImage?.extraLarge || m?.coverImage?.large || '';
+      if (!title || !cover || !/^https?:\/\//i.test(cover)) return false;
+
+      // Secondary client-side genre + tag validation (reject BL/GL/Yaoi/Yuri or missing metadata)
+      if (hasExcludedBlGlGenreOrTagWeb(m?.genres, m?.tags)) return false;
+
       const site = String(m?.trailer?.site || '').toLowerCase();
       const tid = String(m?.trailer?.id || '').trim();
-      return Boolean(title && cover && site === 'youtube' && isValidYouTubeId(tid));
+      return Boolean(site === 'youtube' && isValidYouTubeVideoId(tid));
     });
 
     for (let i = candidates.length - 1; i >= 1; i--) {
@@ -4091,13 +4449,17 @@ query ($page: Int!, $perPage: Int!) {
       const studios = Array.isArray(m?.studios?.nodes)
         ? m.studios.nodes.map((s) => String(s?.name || '').trim()).filter(Boolean)
         : [];
+      const genres = extractGenreNamesWeb(m?.genres);
+      const tags = extractTagNamesWeb(m?.tags);
+      if (hasExcludedBlGlGenreOrTagWeb(genres, tags)) continue;
+
       const startDateStr = formatFuzzyDateNode(m?.startDate);
       const endDateStr = formatFuzzyDateNode(m?.endDate);
       const seasonYear = m?.seasonYear || m?.startDate?.year || null;
 
-      return {
-        id: `auto-${todayUtc}-${id}`,
-        selection_date: todayUtc,
+      const candidateRow = {
+        id: `auto-${todayIst}-${id}`,
+        selection_date: todayIst,
         anilist_id: id,
         title: displayTitle,
         rating: score,
@@ -4117,7 +4479,8 @@ query ($page: Int!, $perPage: Int!) {
           format: m?.format || null,
           season: m?.season || null,
           season_year: seasonYear,
-          genres: Array.isArray(m?.genres) ? m.genres : [],
+          genres,
+          tags,
           description: m?.description || '',
           duration: m?.duration ?? null,
           source: m?.source || null,
@@ -4126,42 +4489,109 @@ query ($page: Int!, $perPage: Int!) {
           trailer: { id: trailerId, site: 'youtube' }
         }
       };
+
+      if (isDailyAnimeRowEligibleWeb(candidateRow, todayIst)) {
+        return candidateRow;
+      }
     }
   }
   return null;
 }
 
+let dailyRandomInFlightPromise = null;
+let dailyRandomIstMidnightTimerId = null;
+
+function scheduleNextIstMidnightResetWeb() {
+  if (typeof window === 'undefined') return;
+  if (dailyRandomIstMidnightTimerId) {
+    clearTimeout(dailyRandomIstMidnightTimerId);
+    dailyRandomIstMidnightTimerId = null;
+  }
+  const waitMs = getMillisUntilNextIstMidnight() + 350;
+  dailyRandomIstMidnightTimerId = setTimeout(() => {
+    const newIstDate = getIstDateKey();
+    const dr = state.dailyRandom;
+    if (!dr.data || dr.fetchedDate !== newIstDate || dr.data.selectionDate !== newIstDate) {
+      dr.data = null;
+      dr.fetchedDate = '';
+      loadDailyRandomAnime(false);
+    }
+    scheduleNextIstMidnightResetWeb();
+  }, waitMs);
+}
+
+function checkDailyRandomIstRolloverOnResumeWeb() {
+  const todayIst = getIstDateKey();
+  const dr = state.dailyRandom;
+  if (dr.data && (dr.fetchedDate !== todayIst || dr.data.selectionDate !== todayIst)) {
+    dr.data = null;
+    dr.fetchedDate = '';
+    loadDailyRandomAnime(false);
+  } else if (!dr.data && !dr.loading && state.tab === 'community' && state.communityViewTab === 'random') {
+    loadDailyRandomAnime(false);
+  }
+}
+
 async function loadDailyRandomAnime(forceRefresh = false) {
-  const todayUtc = getUtcDateKey();
+  scheduleNextIstMidnightResetWeb();
+  const todayIst = getIstDateKey();
   const dr = state.dailyRandom;
 
-  if (!forceRefresh && dr.data && dr.fetchedDate === todayUtc && dr.data.selectionDate === todayUtc) {
-    return;
+  // If the stored recommendation in memory belongs to a previous IST date or fails validation, clear it
+  if (
+    dr.data &&
+    (dr.fetchedDate !== todayIst ||
+      dr.data.selectionDate !== todayIst ||
+      !dr.data.rating100 ||
+      dr.data.rating100 < 60 ||
+      hasExcludedBlGlGenreOrTagWeb(dr.data.genres, dr.data.tags))
+  ) {
+    dr.data = null;
+    dr.fetchedDate = '';
   }
 
-  if (!forceRefresh) {
+  // Never reset a valid daily recommendation on the same IST date when the app is refreshed or reopened
+  if (
+    dr.data &&
+    dr.fetchedDate === todayIst &&
+    dr.data.selectionDate === todayIst &&
+    !dr.error
+  ) {
+    return dr.data;
+  }
+
+  // Restore persisted IST daily recommendation from localStorage if valid for today's IST date
+  if (!forceRefresh || !dr.data) {
     try {
+      localStorage.removeItem(LEGACY_DAILY_RANDOM_CACHE_KEY);
       const cachedRaw = localStorage.getItem(DAILY_RANDOM_CACHE_KEY);
       if (cachedRaw) {
         const cached = JSON.parse(cachedRaw);
+        const cachedIstDate = String(cached?.istDate || cached?.cachedDate || '');
         if (
           cached &&
-          cached.cachedDate === todayUtc &&
-          cached.row &&
-          cached.row.anilist_id &&
-          String(cached.row.selection_date || '') === todayUtc
+          cachedIstDate === todayIst &&
+          isDailyAnimeRowEligibleWeb(cached.row, todayIst)
         ) {
-          dr.data = normalizeDailyAnimeRow(cached.row);
-          dr.fetchedDate = todayUtc;
-          dr.error = '';
-          dr.loading = false;
-          if (state.tab === 'community' && state.communityViewTab === 'random') {
-            renderApp();
+          const normalized = normalizeDailyAnimeRow(cached.row);
+          if (normalized) {
+            dr.data = normalized;
+            dr.fetchedDate = todayIst;
+            dr.error = '';
+            dr.loading = false;
+            if (state.tab === 'community' && state.communityViewTab === 'random') {
+              renderApp();
+            }
+            return normalized;
           }
-          return;
         }
       }
     } catch (_) {}
+  }
+
+  // Prevent multiple simultaneous requests from generating conflicting recommendations
+  if (dailyRandomInFlightPromise) {
+    return dailyRandomInFlightPromise;
   }
 
   dr.loading = true;
@@ -4171,153 +4601,175 @@ async function loadDailyRandomAnime(forceRefresh = false) {
     renderApp();
   }
 
-  try {
-    const baseUrl = getVaultBaseUrl();
-    const apiKey = getVaultPublicKey();
-    const headers = {
-      apikey: apiKey,
-      Accept: 'application/json'
-    };
-    if (state.session?.accessToken) {
-      headers.Authorization = `Bearer ${state.session.accessToken}`;
-    }
-
-    let row = null;
-    const excludedIds = new Set();
-
-    // Stage 1: Read canonical row from Supabase public.daily_anime
+  dailyRandomInFlightPromise = (async () => {
     try {
-      const resp = await fetch(`${baseUrl}/rest/v1/daily_anime?select=*&order=selection_date.desc&limit=1`, {
-        method: 'GET',
-        headers
-      });
-      if (resp.ok) {
-        const rows = await resp.json().catch(() => []);
-        if (Array.isArray(rows) && rows.length > 0) {
-          row = rows[0];
-        }
+      const baseUrl = getVaultBaseUrl();
+      const apiKey = getVaultPublicKey();
+      const headers = {
+        apikey: apiKey,
+        Accept: 'application/json'
+      };
+      if (state.session?.accessToken) {
+        headers.Authorization = `Bearer ${state.session.accessToken}`;
       }
-    } catch (_) {}
 
-    // Stage 2: If today's UTC pick isn't stored yet, try Edge Function if deployed
-    if ((!row || String(row.selection_date || '') !== todayUtc) && state.session?.accessToken) {
+      let row = null;
+      const excludedIds = new Set();
+
+      // Stage 1: Read canonical row for today's IST date from Supabase public.daily_anime
       try {
-        const fnResp = await fetch(`${baseUrl}/functions/v1/daily-random-anime`, {
-          method: 'POST',
-          headers: {
-            apikey: apiKey,
-            Authorization: `Bearer ${state.session.accessToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json'
-          },
-          body: JSON.stringify({ source: 'client_ensure_today' })
-        });
-        if (fnResp.ok) {
-          const fnJson = await fnResp.json().catch(() => null);
-          const candidate = fnJson?.data || fnJson?.anime || null;
-          if (candidate && candidate.anilist_id) {
-            row = candidate;
-          }
-        }
-      } catch (_) {}
-    }
-
-    // Stage 3: Complete automatic daily selector (deterministic UTC-date seed + AniList + YouTube check)
-    if (!row || String(row.selection_date || '') !== todayUtc) {
-      try {
-        const rpcIdsResp = await fetch(`${baseUrl}/rest/v1/rpc/get_featured_anime_ids`, {
-          method: 'POST',
-          headers: { ...headers, 'Content-Type': 'application/json' },
-          body: '{}'
-        });
-        if (rpcIdsResp.ok) {
-          const idsArr = await rpcIdsResp.json().catch(() => []);
-          if (Array.isArray(idsArr)) {
-            idsArr.forEach((id) => {
-              const n = Number(id);
-              if (n > 0) excludedIds.add(n);
-            });
-          }
-        }
-      } catch (_) {}
-
-      if (excludedIds.size === 0) {
-        try {
-          const histResp = await fetch(`${baseUrl}/rest/v1/daily_anime?select=anilist_id&limit=1000`, {
+        const resp = await fetch(
+          `${baseUrl}/rest/v1/daily_anime?select=*&selection_date=eq.${encodeURIComponent(todayIst)}&limit=1`,
+          {
             method: 'GET',
             headers
+          }
+        );
+        if (resp.ok) {
+          const rows = await resp.json().catch(() => []);
+          if (Array.isArray(rows) && rows.length > 0 && isDailyAnimeRowEligibleWeb(rows[0], todayIst)) {
+            row = rows[0];
+          }
+        }
+      } catch (_) {}
+
+      // Stage 2: If today's IST pick isn't stored yet, try Edge Function if deployed
+      if (!isDailyAnimeRowEligibleWeb(row, todayIst) && state.session?.accessToken) {
+        try {
+          const fnResp = await fetch(`${baseUrl}/functions/v1/daily-random-anime`, {
+            method: 'POST',
+            headers: {
+              apikey: apiKey,
+              Authorization: `Bearer ${state.session.accessToken}`,
+              'Content-Type': 'application/json',
+              Accept: 'application/json'
+            },
+            body: JSON.stringify({ source: 'client_ensure_today_ist', selection_date: todayIst })
           });
-          if (histResp.ok) {
-            const histRows = await histResp.json().catch(() => []);
-            if (Array.isArray(histRows)) {
-              histRows.forEach((r) => {
-                const n = Number(r?.anilist_id || 0);
-                if (n > 0) excludedIds.add(n);
-              });
+          if (fnResp.ok) {
+            const fnJson = await fnResp.json().catch(() => null);
+            const candidate = fnJson?.data || fnJson?.anime || null;
+            if (isDailyAnimeRowEligibleWeb(candidate, todayIst)) {
+              row = candidate;
             }
           }
         } catch (_) {}
       }
 
-      const autoRow = await pickAutomaticDailyAnimeRowWeb(todayUtc, excludedIds);
-      if (autoRow) {
-        row = autoRow;
-        // Stage 4: Atomically persist into Supabase via claim_daily_anime_selection RPC (if available & authenticated)
-        if (state.session?.accessToken) {
+      // Stage 3: Complete automatic daily selector (deterministic IST-date seed + AniList BL/GL filter + YouTube check)
+      if (!isDailyAnimeRowEligibleWeb(row, todayIst)) {
+        try {
+          const histResp = await fetch(
+            `${baseUrl}/rest/v1/daily_anime?select=anilist_id,selection_date&limit=1000`,
+            {
+              method: 'GET',
+              headers
+            }
+          );
+          if (histResp.ok) {
+            const histRows = await histResp.json().catch(() => []);
+            if (Array.isArray(histRows)) {
+              histRows.forEach((r) => {
+                const n = Number(r?.anilist_id || 0);
+                const sDate = String(r?.selection_date || '');
+                if (n > 0 && sDate !== todayIst) {
+                  excludedIds.add(n);
+                }
+              });
+            }
+          }
+        } catch (_) {}
+
+        if (excludedIds.size === 0) {
           try {
-            const claimResp = await fetch(`${baseUrl}/rest/v1/rpc/claim_daily_anime_selection`, {
+            const rpcIdsResp = await fetch(`${baseUrl}/rest/v1/rpc/get_featured_anime_ids`, {
               method: 'POST',
-              headers: {
-                apikey: apiKey,
-                Authorization: `Bearer ${state.session.accessToken}`,
-                'Content-Type': 'application/json',
-                Accept: 'application/json'
-              },
-              body: JSON.stringify({
-                p_anilist_id: autoRow.anilist_id,
-                p_title: autoRow.title,
-                p_rating: autoRow.rating,
-                p_cover_image: autoRow.cover_image,
-                p_banner_image: autoRow.banner_image,
-                p_trailer_id: autoRow.trailer_id,
-                p_anime_metadata: autoRow.anime_metadata
-              })
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: '{}'
             });
-            if (claimResp.ok) {
-              const claimJson = await claimResp.json().catch(() => null);
-              const claimed = Array.isArray(claimJson) ? claimJson[0] : claimJson;
-              if (claimed && claimed.anilist_id) {
-                row = claimed;
+            if (rpcIdsResp.ok) {
+              const idsArr = await rpcIdsResp.json().catch(() => []);
+              if (Array.isArray(idsArr)) {
+                idsArr.forEach((id) => {
+                  const n = Number(id);
+                  if (n > 0) excludedIds.add(n);
+                });
               }
             }
           } catch (_) {}
         }
+
+        const autoRow = await pickAutomaticDailyAnimeRowWeb(todayIst, excludedIds);
+        if (autoRow && isDailyAnimeRowEligibleWeb(autoRow, todayIst)) {
+          row = autoRow;
+          // Stage 4: Atomically persist into Supabase via claim_daily_anime_selection RPC (if available & authenticated)
+          if (state.session?.accessToken) {
+            try {
+              const claimResp = await fetch(`${baseUrl}/rest/v1/rpc/claim_daily_anime_selection`, {
+                method: 'POST',
+                headers: {
+                  apikey: apiKey,
+                  Authorization: `Bearer ${state.session.accessToken}`,
+                  'Content-Type': 'application/json',
+                  Accept: 'application/json'
+                },
+                body: JSON.stringify({
+                  p_anilist_id: autoRow.anilist_id,
+                  p_title: autoRow.title,
+                  p_rating: autoRow.rating,
+                  p_cover_image: autoRow.cover_image,
+                  p_banner_image: autoRow.banner_image,
+                  p_trailer_id: autoRow.trailer_id,
+                  p_anime_metadata: autoRow.anime_metadata
+                })
+              });
+              if (claimResp.ok) {
+                const claimJson = await claimResp.json().catch(() => null);
+                const claimed = Array.isArray(claimJson) ? claimJson[0] : claimJson;
+                if (isDailyAnimeRowEligibleWeb(claimed, todayIst)) {
+                  row = claimed;
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      }
+
+      const activeIstDate = getIstDateKey();
+      const normalized = isDailyAnimeRowEligibleWeb(row, activeIstDate)
+        ? normalizeDailyAnimeRow(row)
+        : null;
+
+      if (!normalized) {
+        dr.data = null;
+        dr.fetchedDate = '';
+        dr.error = 'Unable to load today’s featured anime right now. Please try again.';
+        return null;
+      } else {
+        dr.data = normalized;
+        dr.fetchedDate = activeIstDate;
+        dr.error = '';
+        try {
+          localStorage.setItem(
+            DAILY_RANDOM_CACHE_KEY,
+            JSON.stringify({ istDate: activeIstDate, cachedDate: activeIstDate, row })
+          );
+        } catch (_) {}
+        return normalized;
+      }
+    } catch (err) {
+      dr.error = err?.message || 'Could not load today’s anime pick. Please try again.';
+      return null;
+    } finally {
+      dr.loading = false;
+      dailyRandomInFlightPromise = null;
+      if (state.tab === 'community' && state.communityViewTab === 'random') {
+        renderApp();
       }
     }
+  })();
 
-    if (!row) {
-      dr.data = null;
-      dr.fetchedDate = todayUtc;
-      dr.error = 'Unable to load today’s featured anime right now. Please try again.';
-    } else {
-      dr.data = normalizeDailyAnimeRow(row);
-      dr.fetchedDate = todayUtc;
-      dr.error = '';
-      try {
-        localStorage.setItem(
-          DAILY_RANDOM_CACHE_KEY,
-          JSON.stringify({ cachedDate: todayUtc, row })
-        );
-      } catch (_) {}
-    }
-  } catch (err) {
-    dr.error = err?.message || 'Could not load today’s anime pick. Please try again.';
-  } finally {
-    dr.loading = false;
-    if (state.tab === 'community' && state.communityViewTab === 'random') {
-      renderApp();
-    }
-  }
+  return dailyRandomInFlightPromise;
 }
 
 function getCurrentAnimeSeasonAndYear() {
@@ -9046,7 +9498,7 @@ function renderMyListScreen() {
       ${
         state.collections.length === 0
           ? `
-            <div style="background:#12151F;border:1px solid rgba(255,255,255,0.08);border-radius:18px;padding:16px 18px;color:var(--text-secondary);font-size:13.5px;">
+            <div style="background:var(--card-bg);border:1px solid var(--border-subtle);border-radius:18px;padding:16px 18px;color:var(--text-secondary);font-size:13.5px;">
               Create custom collections such as "Absolute Cinema" or "Donghua Favorites".
             </div>
           `
@@ -9239,7 +9691,7 @@ function renderCommunityScreen() {
                           ${
                             n.anime_cover_image
                               ? `<img class="tagged-you-thumb" src="${escapeHtml(n.anime_cover_image)}" alt="" loading="lazy" />`
-                              : `<div class="tagged-you-thumb" style="display:grid;place-items:center;color:#E8C88F;font-weight:700;">★</div>`
+                              : `<div class="tagged-you-thumb" style="display:grid;place-items:center;color:var(--accent-primary);font-weight:700;">★</div>`
                           }
                           <div class="tagged-you-body">
                             <div class="tagged-you-meta-top">
@@ -9454,7 +9906,7 @@ function renderCommunityScreen() {
                       ? (state.profile.avatarKey || cachedP?.avatar_key || r.avatar_key || 'avatar_1')
                       : (cachedP?.avatar_key || r.avatar_key || 'avatar_1');
                     const hasFrame = Boolean(getAvatarFramePreset(resolvedAvKey));
-                    return `<div style="margin-left:${idx === 0 ? '0' : hasFrame ? '2px' : '-6px'};${hasFrame ? '' : 'border:1.5px solid #12151F;border-radius:999px;'}display:inline-flex;overflow:visible;">
+                    return `<div style="margin-left:${idx === 0 ? '0' : hasFrame ? '2px' : '-6px'};${hasFrame ? '' : 'border:1.5px solid var(--card-bg);border-radius:999px;'}display:inline-flex;overflow:visible;">
                       ${renderAvatarCircle(resolvedAvKey, r.username, 28)}
                     </div>`;
                   })
@@ -9793,7 +10245,11 @@ function renderSettingsScreen() {
                   title: 'Notifications',
                   sub: `Status: ${osPermLabel} • Open device notification settings`
                 },
-                { id: 'APPEARANCE', title: 'Appearance', sub: `Theme (${state.prefs.themeMode}) • Accent (${state.prefs.accentTheme}) • Layout (${state.prefs.watchlistLayout})` },
+                {
+                  id: 'APPEARANCE',
+                  title: 'Appearance',
+                  sub: `${state.prefs.themeMode === 'DARK' ? 'Dark' : state.prefs.themeMode === 'LIGHT' ? 'Light' : 'System'} • ${getActiveAccentDisplayInfo().label}`
+                },
                 { id: 'PREFERENCES', title: 'Preferences', sub: `Title Language (${state.prefs.titleLanguage})` },
                 { id: 'ABOUT', title: 'About', sub: 'Anime Universe v2.4.0 • Architecture & Credits' }
               ]
@@ -9819,7 +10275,7 @@ function renderSettingsScreen() {
                     <div class="micro-label" style="color:var(--accent-primary);">DEVICE NOTIFICATIONS</div>
                     <div class="serif-heading" style="font-size:22px;margin-top:2px;">System Notification Settings</div>
                   </div>
-                  <span style="padding:4px 12px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:0.08em;background:rgba(255,255,255,0.06);border:1px solid ${osPermColor};color:${osPermColor};">
+                  <span style="padding:4px 12px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:0.08em;background:var(--surface-subtle);border:1px solid ${osPermColor};color:${osPermColor};">
                     PERMISSION: ${osPermLabel}
                   </span>
                 </div>
@@ -9857,31 +10313,191 @@ function renderSettingsScreen() {
             </div>
           `
           : cat === 'APPEARANCE'
-          ? `
-            <div class="app-card" style="display:flex;flex-direction:column;gap:16px;">
-              <div>
-                <div class="micro-label" style="color:var(--accent-primary);margin-bottom:8px;">THEME MODE</div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                  ${['DARK', 'LIGHT', 'SYSTEM']
-                    .map((m) => `<button class="capsule-pill gold-solid ${state.prefs.themeMode === m ? 'active' : ''}" data-set-theme="${m}">${m}</button>`)
-                    .join('')}
+          ? (() => {
+              const effectiveTheme = getEffectiveWebThemeMode();
+              const isDarkEffective = effectiveTheme === 'dark';
+              const activeAccentInfo = getActiveAccentDisplayInfo();
+              const isCustomSelected = activeAccentInfo.key === 'CUSTOM';
+              const currentCustomHex = sanitizeWebHexColor(state.prefs.customAccentHex) || '#38BDF8';
+              const themeCards = [
+                { id: 'DARK', label: 'Dark', type: 'dark' },
+                { id: 'LIGHT', label: 'Light', type: 'light' },
+                { id: 'SYSTEM', label: 'System', type: 'system' }
+              ];
+              const renderMiniPane = (paneKind) => {
+                const dotColor = paneKind === 'light' ? activeAccentInfo.lightHex : activeAccentInfo.darkHex;
+                return `
+                  <div class="theme-mini-pane ${paneKind === 'light' ? 'is-light' : 'is-dark'}">
+                    <div class="theme-mini-top">
+                      <div class="theme-mini-bar primary"></div>
+                      <span class="theme-mini-dot" style="background:${dotColor};"></span>
+                    </div>
+                    <div class="theme-mini-card">
+                      <div class="theme-mini-bar muted"></div>
+                      <div class="theme-mini-pill" style="background:${dotColor};"></div>
+                    </div>
+                  </div>
+                `;
+              };
+              const themeLabel =
+                state.prefs.themeMode === 'DARK'
+                  ? 'Dark'
+                  : state.prefs.themeMode === 'LIGHT'
+                  ? 'Light'
+                  : `System (${isDarkEffective ? 'Dark' : 'Light'})`;
+              return `
+                <div class="appearance-settings-stack">
+                  <div class="app-card">
+                    <div class="appearance-section-header">
+                      <div>
+                        <div class="micro-label" style="color:var(--accent-primary);">THEME</div>
+                        <div class="serif-heading" style="font-size:21px;margin-top:2px;">Interface Surface</div>
+                        <div class="appearance-section-subtitle">Choose how Anime Universe looks across all screens, cards, and modals.</div>
+                      </div>
+                      <span class="appearance-active-badge">${escapeHtml(themeLabel)}</span>
+                    </div>
+                    <div class="appearance-theme-grid" role="radiogroup" aria-label="Theme Mode">
+                      ${themeCards
+                        .map((card) => {
+                          const selected = state.prefs.themeMode === card.id;
+                          return `
+                            <button
+                              type="button"
+                              class="theme-preview-card ${selected ? 'selected' : ''}"
+                              data-set-theme="${card.id}"
+                              role="radio"
+                              aria-checked="${selected ? 'true' : 'false'}"
+                            >
+                              <div class="theme-preview-mini">
+                                ${
+                                  card.type === 'system'
+                                    ? `${renderMiniPane('dark')}${renderMiniPane('light')}`
+                                    : renderMiniPane(card.type)
+                                }
+                                ${selected ? `<span class="theme-preview-check" aria-hidden="true">✓</span>` : ''}
+                              </div>
+                              <span class="theme-preview-label">${card.label}</span>
+                            </button>
+                          `;
+                        })
+                        .join('')}
+                    </div>
+                  </div>
+
+                  <div class="app-card">
+                    <div class="appearance-section-header">
+                      <div>
+                        <div class="micro-label" style="color:var(--accent-primary);">ACCENT COLOR</div>
+                        <div class="serif-heading" style="font-size:21px;margin-top:2px;">Signature Highlight</div>
+                        <div class="appearance-section-subtitle">Applies to buttons, active navigation, tabs, and highlights in both Dark &amp; Light modes.</div>
+                      </div>
+                      <span class="appearance-active-badge">${escapeHtml(activeAccentInfo.label)}</span>
+                    </div>
+
+                    <div class="accent-swatch-grid" role="radiogroup" aria-label="Accent Color">
+                      ${WEB_ACCENT_PRESETS.map((preset) => {
+                        const selected = activeAccentInfo.key === preset.id;
+                        const fillHex = isDarkEffective ? preset.darkHex : preset.lightHex;
+                        const rgb = hexToRgbObj(fillHex);
+                        const checkColor = pickAccessibleOnAccentHex(rgb.r, rgb.g, rgb.b);
+                        return `
+                          <button
+                            type="button"
+                            class="accent-swatch-item ${selected ? 'selected' : ''}"
+                            data-set-accent="${preset.id}"
+                            role="radio"
+                            aria-checked="${selected ? 'true' : 'false'}"
+                            title="${escapeHtml(preset.label)}"
+                          >
+                            <span class="accent-swatch-circle">
+                              <span class="accent-swatch-fill" style="background:${fillHex};color:${checkColor};">
+                                ${selected ? '✓' : ''}
+                              </span>
+                            </span>
+                            <span class="accent-swatch-name">${escapeHtml(preset.shortLabel)}</span>
+                          </button>
+                        `;
+                      }).join('')}
+
+                      <button
+                        type="button"
+                        class="accent-swatch-item ${isCustomSelected ? 'selected' : ''}"
+                        data-set-accent="CUSTOM"
+                        role="radio"
+                        aria-checked="${isCustomSelected ? 'true' : 'false'}"
+                        title="Custom Accent Color"
+                      >
+                        <span class="accent-swatch-circle">
+                          ${
+                            isCustomSelected
+                              ? (() => {
+                                  const customFill = isDarkEffective ? activeAccentInfo.darkHex : activeAccentInfo.lightHex;
+                                  const cRgb = hexToRgbObj(customFill);
+                                  const cCheck = pickAccessibleOnAccentHex(cRgb.r, cRgb.g, cRgb.b);
+                                  return `<span class="accent-swatch-fill" style="background:${customFill};color:${cCheck};">✓</span>`;
+                                })()
+                              : `<span class="accent-swatch-fill rainbow"></span>`
+                          }
+                        </span>
+                        <span class="accent-swatch-name">Custom</span>
+                      </button>
+                    </div>
+
+                    ${
+                      isCustomSelected
+                        ? `
+                          <div class="custom-accent-panel">
+                            <div class="micro-label" style="color:var(--text-secondary);">CUSTOM COLOR PICKER</div>
+                            <div class="custom-accent-quick-row">
+                              ${WEB_CUSTOM_QUICK_HEXES.map((hex) => {
+                                const qSelected = currentCustomHex === hex;
+                                const qRgb = hexToRgbObj(hex);
+                                const qCheck = pickAccessibleOnAccentHex(qRgb.r, qRgb.g, qRgb.b);
+                                return `
+                                  <button
+                                    type="button"
+                                    class="custom-quick-dot ${qSelected ? 'selected' : ''}"
+                                    data-set-custom-quick="${hex}"
+                                    aria-label="Select custom color ${hex}"
+                                    title="${hex}"
+                                  >
+                                    <span class="custom-quick-dot-inner" style="background:${hex};color:${qCheck};">
+                                      ${qSelected ? '✓' : ''}
+                                    </span>
+                                  </button>
+                                `;
+                              }).join('')}
+                            </div>
+                            <div class="custom-accent-controls">
+                              <input
+                                type="color"
+                                id="inp-custom-accent-color"
+                                class="custom-color-native"
+                                value="${escapeHtml(currentCustomHex)}"
+                                aria-label="Pick custom accent color"
+                              />
+                              <input
+                                type="text"
+                                id="inp-custom-accent-hex"
+                                class="custom-hex-input"
+                                value="${escapeHtml(currentCustomHex)}"
+                                maxlength="7"
+                                spellcheck="false"
+                                placeholder="#38BDF8"
+                                aria-label="Custom hex color code"
+                              />
+                              <button type="button" class="btn-primary" id="btn-apply-custom-accent" style="height:44px;padding:0 18px;font-size:13px;">
+                                Apply
+                              </button>
+                            </div>
+                          </div>
+                        `
+                        : ''
+                    }
+                  </div>
                 </div>
-              </div>
-              <div>
-                <div class="micro-label" style="color:var(--accent-primary);margin-bottom:8px;">ACCENT PALETTE</div>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                  ${[
-                    { id: 'GOLD', label: 'Champagne Gold' },
-                    { id: 'ROSE', label: 'Sakura Rose' },
-                    { id: 'EMERALD', label: 'Emerald Mint' },
-                    { id: 'INDIGO', label: 'Midnight Indigo' }
-                  ]
-                    .map((a) => `<button class="capsule-pill gold-solid ${state.prefs.accentTheme === a.id ? 'active' : ''}" data-set-accent="${a.id}">${a.label}</button>`)
-                    .join('')}
-                </div>
-              </div>
-            </div>
-          `
+              `;
+            })()
           : cat === 'PREFERENCES'
           ? `
             <div class="app-card" style="display:flex;flex-direction:column;gap:18px;">
@@ -9994,7 +10610,7 @@ function renderAnimeDetailScreen() {
     <div style="max-width:940px;margin:0 auto;">
       <div style="position:relative;width:100%;height:300px;border-radius:26px;overflow:hidden;margin-bottom:16px;background:var(--card-bg);">
         <img src="${escapeHtml(a.bannerImage || a.coverImage)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;" />
-        <div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,0.45) 0%,rgba(0,0,0,0.18) 32%,rgba(9,11,16,0.85) 72%,var(--bg-main) 100%);"></div>
+        <div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(9,11,16,0.45) 0%,rgba(9,11,16,0.22) 32%,rgba(9,11,16,0.86) 72%,rgba(9,11,16,0.95) 100%);"></div>
 
         <div style="position:absolute;top:14px;left:14px;right:14px;display:flex;justify-content:space-between;">
           <button class="app-icon-btn" id="btn-detail-back" style="background:rgba(8,8,12,0.68);color:#FFF;">${SVG_ICONS.back}</button>
@@ -10007,7 +10623,7 @@ function renderAnimeDetailScreen() {
           <img src="${escapeHtml(a.coverImage)}" alt="" style="width:104px;height:152px;object-fit:cover;border-radius:18px;border:1px solid var(--border-strong);flex-shrink:0;box-shadow:0 10px 28px rgba(0,0,0,0.7);" />
           <div style="flex:1;min-width:0;">
             <h1 class="serif-heading" style="font-size:28px;line-height:30px;color:#FFF;">${escapeHtml(title)}</h1>
-            ${subJp ? `<div class="micro-label" style="color:var(--text-secondary);margin-top:4px;">${escapeHtml(subJp)}</div>` : ''}
+            ${subJp ? `<div class="micro-label" style="color:rgba(255,255,255,0.78);margin-top:4px;">${escapeHtml(subJp)}</div>` : ''}
             <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap;">
               <span class="rating-badge" style="color:var(--accent-primary);">${escapeHtml(formatTag)}</span>
               <span class="rating-badge" style="color:var(--text-secondary);">${escapeHtml(statusTag)}${a.seasonYear ? ` • ${a.seasonYear}` : ''}</span>
@@ -10244,11 +10860,11 @@ function renderEmojiTrayHtml(scope) {
     <div class="emoji-tray ${isOpen ? 'open' : ''}" id="livtrak-emoji-tray">
       <div class="emoji-tray-head">
         <span class="emoji-tray-label">Top Emojis</span>
-        <span class="emoji-tray-label" style="color:#66667A;">${allEmojis.length} available</span>
+        <span class="emoji-tray-label" style="color:var(--text-muted);">${allEmojis.length} available</span>
       </div>
       ${
         allEmojis.length === 0
-          ? `<div style="padding:14px 4px;text-align:center;color:#9A9AA8;font-size:12px;">
+          ? `<div style="padding:14px 4px;text-align:center;color:var(--text-secondary);font-size:12px;">
                No custom emojis found yet. Upload GIF/PNG/WebP files to your Supabase <strong>community_emojis</strong> bucket.
              </div>`
           : `
@@ -10330,9 +10946,9 @@ function renderAnimeDiscussionSection(anime, options = {}) {
     <div class="livtrak-chat-shell ${inModal ? '' : 'inline-detail-chat'}" id="anime-discussion-section">
       ${
         !inModal
-          ? `<div style="padding:12px 18px;border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:space-between;">
-               <span style="font-size:13px;font-weight:700;color:#E8C88F;letter-spacing:0.4px;">Live Chat</span>
-               <span class="tabular-num" style="font-size:11.5px;color:#9A9AA8;">${d.totalComments} ${d.totalComments === 1 ? 'message' : 'messages'}</span>
+          ? `<div style="padding:12px 18px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;justify-content:space-between;">
+               <span style="font-size:13px;font-weight:700;color:var(--accent-primary);letter-spacing:0.4px;">Live Chat</span>
+               <span class="tabular-num" style="font-size:11.5px;color:var(--text-secondary);">${d.totalComments} ${d.totalComments === 1 ? 'message' : 'messages'}</span>
              </div>`
           : ''
       }
@@ -10342,7 +10958,7 @@ function renderAnimeDiscussionSection(anime, options = {}) {
       <div class="chat-messages" id="livtrak-chat-messages">
         ${
           d.hasMore
-            ? `<button type="button" class="c-micro-action" id="btn-discussion-load-more" style="align-self:center;padding:5px 12px;border-radius:999px;background:rgba(232,200,143,0.08);border:1px solid rgba(232,200,143,0.22);color:#E8C88F;" ${d.loadingMore ? 'disabled' : ''}>
+            ? `<button type="button" class="c-micro-action" id="btn-discussion-load-more" style="align-self:center;padding:5px 12px;border-radius:999px;background:var(--accent-soft);border:1px solid var(--accent-border);color:var(--accent-primary);" ${d.loadingMore ? 'disabled' : ''}>
                  ${d.loadingMore ? 'Loading earlier messages...' : 'Load earlier messages'}
                </button>`
             : ''
@@ -10350,10 +10966,10 @@ function renderAnimeDiscussionSection(anime, options = {}) {
 
         ${
           d.loading && chronological.length === 0
-            ? `<div style="margin:auto;text-align:center;color:#9A9AA8;font-size:13px;padding:30px 12px;">Loading chat...</div>`
+            ? `<div style="margin:auto;text-align:center;color:var(--text-secondary);font-size:13px;padding:30px 12px;">Loading chat...</div>`
             : chronological.length === 0
-            ? `<div style="margin:auto;text-align:center;color:#9A9AA8;font-size:13px;padding:34px 16px;">
-                 No messages yet for <strong style="color:#F8F4EB;">${escapeHtml(resolveTitle(anime))}</strong>. Say hi!
+            ? `<div style="margin:auto;text-align:center;color:var(--text-secondary);font-size:13px;padding:34px 16px;">
+                 No messages yet for <strong style="color:var(--text-primary);">${escapeHtml(resolveTitle(anime))}</strong>. Say hi!
                </div>`
             : chronological
                 .map((c) => {
@@ -10473,13 +11089,13 @@ function renderAnimeDiscussionSection(anime, options = {}) {
                             : ''
                         }
                       </div>
-                      <button type="button" class="c-micro-action" id="btn-cancel-reply-composer" style="color:#E8C88F;flex-shrink:0;">✕ Cancel</button>
+                      <button type="button" class="c-micro-action" id="btn-cancel-reply-composer" style="color:var(--accent-primary);flex-shrink:0;">✕ Cancel</button>
                     </div>
                   `
                   : ''
               }
 
-              ${activeTags.length > 0 ? `<div style="padding:4px 16px 2px;background:#0A0A10;">${renderSelectedTagChipsHtml(activeScope, activeTags)}</div>` : ''}
+              ${activeTags.length > 0 ? `<div style="padding:4px 16px 2px;background:var(--surface-modal);">${renderSelectedTagChipsHtml(activeScope, activeTags)}</div>` : ''}
               ${renderComposerEmojiPreviewHtml(activeDraft)}
               ${renderEmojiTrayHtml(activeScope)}
 
@@ -10523,7 +11139,7 @@ function renderAnimeDiscussionSection(anime, options = {}) {
             </div>
           `
           : `
-            <div style="padding:12px 16px;border-top:1px solid rgba(255,255,255,0.06);background:#0A0A10;font-size:12.5px;color:#9A9AA8;text-align:center;">
+            <div style="padding:12px 16px;border-top:1px solid var(--border-subtle);background:var(--bg-secondary);font-size:12.5px;color:var(--text-secondary);text-align:center;">
               Sign in to join Live Chat, send custom emojis, and tag members with @.
             </div>
           `
@@ -11707,7 +12323,7 @@ function renderModals() {
               ${
                 grp.anime_cover_image
                   ? `<img class="hub-poster" src="${escapeHtml(grp.anime_cover_image)}" alt="" data-open-detail="${Number(grp.anime_id)}" />`
-                  : `<div class="hub-poster" style="display:grid;place-items:center;background:#14141E;color:#E8C88F;font-weight:700;" data-open-detail="${Number(grp.anime_id)}">★</div>`
+                  : `<div class="hub-poster" style="display:grid;place-items:center;background:var(--elevated-surface);color:var(--accent-primary);font-weight:700;" data-open-detail="${Number(grp.anime_id)}">★</div>`
               }
               <div class="hub-info">
                 <div class="hub-eyebrow">COMMUNITY HUB</div>
@@ -11749,7 +12365,7 @@ function renderModals() {
                     <div class="hub-reviews-scroll">
                       ${
                         grp.reviews.length === 0
-                          ? `<div style="text-align:center;color:#9A9AA8;font-size:13px;padding:34px 12px;">No written reviews yet. Share your star rating or note below!</div>`
+                          ? `<div style="text-align:center;color:var(--text-secondary);font-size:13px;padding:34px 12px;">No written reviews yet. Share your star rating or note below!</div>`
                           : grp.reviews
                               .map((rev) => {
                                 const rStars = rev.rating ? rating10ToStars(rev.rating) || 0 : 0;
@@ -14221,11 +14837,61 @@ function bindAppEvents() {
   });
   document.querySelectorAll('[data-set-accent]').forEach((btn) => {
     btn.onclick = () => {
-      state.prefs.accentTheme = btn.getAttribute('data-set-accent');
+      state.prefs.accentTheme = normalizeWebAccentKey(btn.getAttribute('data-set-accent'));
       savePrefs();
       renderApp();
     };
   });
+  document.querySelectorAll('[data-set-custom-quick]').forEach((btn) => {
+    btn.onclick = () => {
+      const hex = sanitizeWebHexColor(btn.getAttribute('data-set-custom-quick'));
+      if (!hex) return;
+      state.prefs.accentTheme = 'CUSTOM';
+      state.prefs.customAccentHex = hex;
+      savePrefs();
+      renderApp();
+    };
+  });
+  const inpCustomColor = document.getElementById('inp-custom-accent-color');
+  const inpCustomHex = document.getElementById('inp-custom-accent-hex');
+  const btnApplyCustomAccent = document.getElementById('btn-apply-custom-accent');
+  if (inpCustomColor) {
+    inpCustomColor.oninput = (e) => {
+      const hex = sanitizeWebHexColor(e.target.value);
+      if (!hex) return;
+      state.prefs.accentTheme = 'CUSTOM';
+      state.prefs.customAccentHex = hex;
+      if (inpCustomHex) inpCustomHex.value = hex;
+      savePrefs();
+    };
+    inpCustomColor.onchange = () => {
+      renderApp();
+    };
+  }
+  const applyCustomHexInput = () => {
+    if (!inpCustomHex) return;
+    const parsed = sanitizeWebHexColor(inpCustomHex.value);
+    if (!parsed) {
+      showToast('Enter a valid hex color like #38BDF8', true);
+      renderApp();
+      return;
+    }
+    state.prefs.accentTheme = 'CUSTOM';
+    state.prefs.customAccentHex = parsed;
+    savePrefs();
+    renderApp();
+  };
+  if (btnApplyCustomAccent) {
+    btnApplyCustomAccent.onclick = applyCustomHexInput;
+  }
+  if (inpCustomHex) {
+    inpCustomHex.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        applyCustomHexInput();
+      }
+    };
+  }
   document.querySelectorAll('[data-set-lang]').forEach((btn) => {
     btn.onclick = () => {
       state.prefs.titleLanguage = btn.getAttribute('data-set-lang');
@@ -16580,7 +17246,10 @@ if (typeof window !== 'undefined') {
   };
 }
 
+scheduleNextIstMidnightResetWeb();
+
 window.addEventListener('focus', () => {
+  checkDailyRandomIstRolloverOnResumeWeb();
   reconcileNotificationsOnReturn(true);
   triggerThrottledSilentSync();
   NativeNotificationBridge.detectActualOsPermission()
@@ -16590,12 +17259,14 @@ window.addEventListener('focus', () => {
 
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
+    checkDailyRandomIstRolloverOnResumeWeb();
     reconcileNotificationsOnReturn(true);
     triggerThrottledSilentSync();
   }
 });
 
 window.addEventListener('online', () => {
+  checkDailyRandomIstRolloverOnResumeWeb();
   reconcileNotificationsOnReturn(true);
 });
 

@@ -837,6 +837,7 @@ data class DailyAnimePick(
     val studios: List<String> = emptyList(),
     val countryOfOrigin: String? = null,
     val genres: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
     val description: String = ""
 ) {
     val rating10Text: String
@@ -889,6 +890,100 @@ data class DailyAnimePick(
 object DailyAnimeFormatters {
     private val YT_ID_REGEX = Regex("^[A-Za-z0-9_-]{11}$")
     private val MONTHS = arrayOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    val IST_ZONE: java.time.ZoneId = java.time.ZoneId.of("Asia/Kolkata")
+
+    val EXCLUDED_ANILIST_GENRES: List<String> = listOf(
+        "Hentai",
+        "Boys' Love",
+        "Girls' Love",
+        "Yaoi",
+        "Yuri",
+        "Shounen Ai",
+        "Shoujo Ai"
+    )
+
+    val EXCLUDED_ANILIST_TAGS: List<String> = listOf(
+        "Boys' Love",
+        "Girls' Love",
+        "Yuri",
+        "Yaoi",
+        "Shounen Ai",
+        "Shoujo Ai"
+    )
+
+    private val EXCLUDED_BL_GL_EXACT_TOKENS: Set<String> = setOf(
+        "bl",
+        "gl",
+        "yaoi",
+        "yuri",
+        "boys' love",
+        "boys love",
+        "boy's love",
+        "girls' love",
+        "girls love",
+        "girl's love",
+        "shounen ai",
+        "shonen ai",
+        "shoujo ai",
+        "shojo ai"
+    )
+
+    private val EXCLUDED_BL_GL_PHRASE_REGEX = Regex(
+        "(^|[^a-z0-9])(boys'?\\s*love|boy's\\s*love|girls'?\\s*love|girl's\\s*love|yaoi|yuri|shou?nen\\s*ai|shou?jo\\s*ai)([^a-z0-9]|$)"
+    )
+
+    fun getCurrentIstDateString(): String {
+        return java.time.LocalDate.now(IST_ZONE).toString()
+    }
+
+    fun millisUntilNextIstMidnight(): Long {
+        val nowIst = java.time.ZonedDateTime.now(IST_ZONE)
+        val nextMidnightIst = nowIst.toLocalDate().plusDays(1).atStartOfDay(IST_ZONE)
+        return java.time.Duration.between(nowIst, nextMidnightIst).toMillis().coerceAtLeast(1000L)
+    }
+
+    fun isExcludedBlGlToken(raw: String?): Boolean {
+        if (raw.isNullOrBlank()) return false
+        val normalized = raw
+            .trim()
+            .lowercase(java.util.Locale.US)
+            .replace('’', '\'')
+            .replace('‘', '\'')
+            .replace('`', '\'')
+            .replace(Regex("[_\\-]+"), " ")
+            .replace(Regex("\\s+"), " ")
+        if (normalized in EXCLUDED_BL_GL_EXACT_TOKENS) return true
+        return EXCLUDED_BL_GL_PHRASE_REGEX.containsMatchIn(normalized)
+    }
+
+    fun hasExcludedBlGlGenreOrTag(genres: List<String>, tags: List<String>): Boolean {
+        if (genres.isEmpty()) return true
+        for (genre in genres) {
+            if (isExcludedBlGlToken(genre)) return true
+        }
+        for (tag in tags) {
+            if (isExcludedBlGlToken(tag)) return true
+        }
+        return false
+    }
+
+    fun isPickEligibleForDate(pick: DailyAnimePick?, expectedIstDate: String? = null): Boolean {
+        if (pick == null) return false
+        if (pick.anilistId <= 0) return false
+        if (pick.title.isBlank() || pick.title == "Unknown") return false
+        if (!pick.coverImage.startsWith("http://", ignoreCase = true) &&
+            !pick.coverImage.startsWith("https://", ignoreCase = true)
+        ) {
+            return false
+        }
+        val score = pick.rating100 ?: return false
+        if (score !in 60..100) return false
+        if (!isValidYouTubeId(pick.trailerId)) return false
+        if (pick.genres.isEmpty() || pick.tags.isEmpty()) return false
+        if (hasExcludedBlGlGenreOrTag(pick.genres, pick.tags)) return false
+        if (expectedIstDate != null && pick.selectionDate != expectedIstDate) return false
+        return true
+    }
 
     fun isValidYouTubeId(id: String?): Boolean {
         return !id.isNullOrBlank() && YT_ID_REGEX.matches(id.trim())
@@ -966,4 +1061,5 @@ object DailyAnimeFormatters {
             .trim()
     }
 }
+
 

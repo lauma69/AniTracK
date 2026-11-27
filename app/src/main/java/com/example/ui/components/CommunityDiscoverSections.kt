@@ -332,7 +332,7 @@ fun RandomAnimeOfTheDaySection(
                                         .width(116.dp)
                                         .height(168.dp)
                                         .clip(RoundedCornerShape(16.dp))
-                                        .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
+                                        .border(1.dp, colors.borderSubtle, RoundedCornerShape(16.dp))
                                         .clickable(enabled = pick.anilistId > 0) { onSelectAnime(pick.anilistId) }
                                 )
 
@@ -390,8 +390,8 @@ fun RandomAnimeOfTheDaySection(
 
                                         Surface(
                                             shape = CircleShape,
-                                            color = Color.White.copy(alpha = 0.06f),
-                                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f))
+                                            color = colors.backgroundSecondary,
+                                            border = BorderStroke(1.dp, colors.borderSubtle)
                                         ) {
                                             Text(
                                                 text = pick.formatLabel,
@@ -402,15 +402,15 @@ fun RandomAnimeOfTheDaySection(
                                         }
 
                                         val statusTint = when (pick.rawStatus?.uppercase()) {
-                                            "RELEASING" -> Color(0xFF6EE7B7)
-                                            "NOT_YET_RELEASED" -> Color(0xFFC7D2FE)
-                                            "CANCELLED" -> Color(0xFFFCA5A5)
+                                            "RELEASING" -> colors.success
+                                            "NOT_YET_RELEASED" -> colors.accentPrimary
+                                            "CANCELLED" -> colors.error
                                             else -> colors.textSecondary
                                         }
                                         Surface(
                                             shape = CircleShape,
-                                            color = statusTint.copy(alpha = 0.13f),
-                                            border = BorderStroke(1.dp, statusTint.copy(alpha = 0.35f))
+                                            color = statusTint.copy(alpha = if (colors.isDark) 0.14f else 0.11f),
+                                            border = BorderStroke(1.dp, statusTint.copy(alpha = if (colors.isDark) 0.35f else 0.38f))
                                         ) {
                                             Text(
                                                 text = pick.statusLabel,
@@ -429,13 +429,13 @@ fun RandomAnimeOfTheDaySection(
                                             pick.genres.take(4).forEach { genre ->
                                                 Surface(
                                                     shape = CircleShape,
-                                                    color = Color(0xFFA78BFA).copy(alpha = 0.12f),
-                                                    border = BorderStroke(1.dp, Color(0xFFA78BFA).copy(alpha = 0.25f))
+                                                    color = colors.accentPrimary.copy(alpha = if (colors.isDark) 0.13f else 0.10f),
+                                                    border = BorderStroke(1.dp, colors.accentPrimary.copy(alpha = if (colors.isDark) 0.28f else 0.30f))
                                                 ) {
                                                     Text(
                                                         text = genre,
                                                         style = MaterialTheme.typography.labelSmall,
-                                                        color = Color(0xFFDDD6FE),
+                                                        color = colors.highlight,
                                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                                     )
                                                 }
@@ -458,8 +458,8 @@ fun RandomAnimeOfTheDaySection(
                             // Expandable View Details Button
                             Surface(
                                 shape = CircleShape,
-                                color = Color.White.copy(alpha = 0.06f),
-                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.14f)),
+                                color = colors.backgroundSecondary,
+                                border = BorderStroke(1.dp, colors.borderSubtle),
                                 modifier = Modifier
                                     .heightIn(min = 42.dp)
                                     .clip(CircleShape)
@@ -489,8 +489,8 @@ fun RandomAnimeOfTheDaySection(
                             AnimatedVisibility(visible = detailsExpanded) {
                                 Surface(
                                     shape = RoundedCornerShape(18.dp),
-                                    color = Color.White.copy(alpha = 0.035f),
-                                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                                    color = colors.backgroundSecondary,
+                                    border = BorderStroke(1.dp, colors.borderSubtle),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     val detailPairs = listOf(
@@ -540,7 +540,7 @@ fun RandomAnimeOfTheDaySection(
                                 }
                             }
 
-                            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                            HorizontalDivider(color = colors.borderSubtle)
 
                             // Trailer Section (Lazy — Never auto-loads YouTube iframe!)
                             val trailerId = pick.validTrailerId
@@ -589,7 +589,8 @@ fun RandomAnimeOfTheDaySection(
                                     trailerId == null -> {
                                         Surface(
                                             shape = RoundedCornerShape(14.dp),
-                                            color = Color.White.copy(alpha = 0.04f),
+                                            color = colors.backgroundSecondary,
+                                            border = BorderStroke(1.dp, colors.borderSubtle),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
                                             Text(
@@ -607,7 +608,7 @@ fun RandomAnimeOfTheDaySection(
                                                 .fillMaxWidth()
                                                 .aspectRatio(16f / 9f)
                                                 .clip(RoundedCornerShape(18.dp))
-                                                .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
+                                                .border(1.dp, colors.borderSubtle, RoundedCornerShape(18.dp))
                                                 .background(Color(0xFF09090F))
                                                 .clickable { trailerPlaying = true }
                                                 .testTag("random_anime_play_trailer_button"),
@@ -637,7 +638,7 @@ fun RandomAnimeOfTheDaySection(
                                                         Icon(
                                                             imageVector = Icons.Filled.PlayArrow,
                                                             contentDescription = "Play Trailer",
-                                                            tint = Color(0xFF0D0E16),
+                                                            tint = colors.onAccentPrimary,
                                                             modifier = Modifier.size(32.dp)
                                                         )
                                                     }
@@ -659,8 +660,8 @@ fun RandomAnimeOfTheDaySection(
                                     trailerEmbedFailed -> {
                                         Surface(
                                             shape = RoundedCornerShape(18.dp),
-                                            color = Color.White.copy(alpha = 0.04f),
-                                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
+                                            color = colors.backgroundSecondary,
+                                            border = BorderStroke(1.dp, colors.borderSubtle),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
                                             Column(
@@ -907,10 +908,12 @@ private fun YouTubeLazyTrailerPlayer(
 @Composable
 private fun RandomAnimeSkeletonCard() {
     val colors = AppTheme.colors
+    val skelColor = colors.textMuted.copy(alpha = if (colors.isDark) 0.16f else 0.14f)
+    val skelSoft = colors.textMuted.copy(alpha = if (colors.isDark) 0.11f else 0.09f)
     Surface(
         shape = RoundedCornerShape(26.dp),
-        color = colors.elevatedSurface.copy(alpha = 0.96f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+        color = colors.cardBackground,
+        border = BorderStroke(1.dp, colors.borderSubtle),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -922,14 +925,14 @@ private fun RandomAnimeSkeletonCard() {
                     .width(120.dp)
                     .height(22.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.08f))
+                    .background(skelColor)
             )
             Box(
                 modifier = Modifier
                     .width(220.dp)
                     .height(28.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(Color.White.copy(alpha = 0.08f))
+                    .background(skelColor)
             )
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Box(
@@ -937,7 +940,7 @@ private fun RandomAnimeSkeletonCard() {
                         .width(116.dp)
                         .height(168.dp)
                         .clip(RoundedCornerShape(16.dp))
-                        .background(Color.White.copy(alpha = 0.08f))
+                        .background(skelColor)
                 )
                 Column(
                     modifier = Modifier.weight(1f),
@@ -948,28 +951,28 @@ private fun RandomAnimeSkeletonCard() {
                             .fillMaxWidth(0.85f)
                             .height(22.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White.copy(alpha = 0.08f))
+                            .background(skelColor)
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.55f)
                             .height(16.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White.copy(alpha = 0.06f))
+                            .background(skelSoft)
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(14.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White.copy(alpha = 0.06f))
+                            .background(skelSoft)
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.75f)
                             .height(14.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color.White.copy(alpha = 0.06f))
+                            .background(skelSoft)
                     )
                 }
             }
@@ -978,7 +981,7 @@ private fun RandomAnimeSkeletonCard() {
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
                     .clip(RoundedCornerShape(18.dp))
-                    .background(Color.White.copy(alpha = 0.07f))
+                    .background(skelSoft)
             )
         }
     }
@@ -1005,11 +1008,13 @@ fun TopAnimeCommunitySection(
     modifier: Modifier = Modifier
 ) {
     val colors = AppTheme.colors
-    val pillBgInactive = Color(0xFF1B1C2B)
-    val pillBgActive = Color(0xFF332E4D)
-    val pillTextInactive = Color(0xFFD1D3E2)
-    val pillTextActive = Color(0xFFC4B5FD)
-    val crownTint = Color(0xFFA78BFA)
+    val pillBgInactive = colors.backgroundSecondary
+    val pillBgActive = colors.accentPrimary.copy(alpha = if (colors.isDark) 0.22f else 0.14f)
+    val pillTextInactive = colors.textSecondary
+    val pillTextActive = colors.highlight
+    val crownTint = colors.accentPrimary
+    val skelStrong = colors.textMuted.copy(alpha = if (colors.isDark) 0.16f else 0.14f)
+    val skelSoft = colors.textMuted.copy(alpha = if (colors.isDark) 0.11f else 0.09f)
 
     LazyColumn(
         modifier = modifier.testTag("community_top_section"),
@@ -1024,8 +1029,8 @@ fun TopAnimeCommunitySection(
         item(key = "top_anime_header_card") {
             Surface(
                 shape = RoundedCornerShape(24.dp),
-                color = Color(0xFF0E0F18),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                color = colors.cardBackground,
+                border = BorderStroke(1.dp, colors.borderSubtle),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
@@ -1054,7 +1059,7 @@ fun TopAnimeCommunitySection(
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 21.sp
                                 ),
-                                color = Color.White
+                                color = colors.textPrimary
                             )
                         }
 
@@ -1074,7 +1079,10 @@ fun TopAnimeCommunitySection(
                             Surface(
                                 shape = CircleShape,
                                 color = if (active) pillBgActive else pillBgInactive,
-                                border = if (active) BorderStroke(1.dp, crownTint.copy(alpha = 0.35f)) else null,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (active) crownTint.copy(alpha = 0.55f) else colors.borderSubtle
+                                ),
                                 modifier = Modifier
                                     .heightIn(min = 38.dp)
                                     .clip(CircleShape)
@@ -1095,7 +1103,7 @@ fun TopAnimeCommunitySection(
                         }
                     }
 
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                    HorizontalDivider(color = colors.borderSubtle)
 
                     // Row 2: Weekly | Monthly | Seasonal | Yearly | All Time
                     FlowRow(
@@ -1107,7 +1115,10 @@ fun TopAnimeCommunitySection(
                             Surface(
                                 shape = CircleShape,
                                 color = if (active) pillBgActive else pillBgInactive,
-                                border = if (active) BorderStroke(1.dp, crownTint.copy(alpha = 0.35f)) else null,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (active) crownTint.copy(alpha = 0.55f) else colors.borderSubtle
+                                ),
                                 modifier = Modifier
                                     .heightIn(min = 38.dp)
                                     .clip(CircleShape)
@@ -1136,8 +1147,8 @@ fun TopAnimeCommunitySection(
                 items(6, key = { "top_skel_$it" }) {
                     Surface(
                         shape = RoundedCornerShape(20.dp),
-                        color = colors.elevatedSurface.copy(alpha = 0.85f),
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.06f)),
+                        color = colors.cardBackground,
+                        border = BorderStroke(1.dp, colors.borderSubtle),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -1149,14 +1160,14 @@ fun TopAnimeCommunitySection(
                                 modifier = Modifier
                                     .size(36.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(Color.White.copy(alpha = 0.07f))
+                                    .background(skelSoft)
                             )
                             Box(
                                 modifier = Modifier
                                     .width(52.dp)
                                     .height(74.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(Color.White.copy(alpha = 0.08f))
+                                    .background(skelStrong)
                             )
                             Column(
                                 modifier = Modifier.weight(1f),
@@ -1167,14 +1178,14 @@ fun TopAnimeCommunitySection(
                                         .fillMaxWidth(0.75f)
                                         .height(16.dp)
                                         .clip(RoundedCornerShape(6.dp))
-                                        .background(Color.White.copy(alpha = 0.08f))
+                                        .background(skelStrong)
                                 )
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth(0.45f)
                                         .height(12.dp)
                                         .clip(RoundedCornerShape(6.dp))
-                                        .background(Color.White.copy(alpha = 0.06f))
+                                        .background(skelSoft)
                                 )
                             }
                         }
@@ -1258,16 +1269,28 @@ private fun TopAnimeRankRowCard(
 ) {
     val colors = AppTheme.colors
     val (rankBg, rankText, rankBorder) = when (rank) {
-        1 -> Triple(Color(0x3DFBBF24), Color(0xFFFDE68A), Color(0x8CFBBF24))
-        2 -> Triple(Color(0x33E2E8F0), Color(0xFFF1F5F9), Color(0x80CBD5E1))
-        3 -> Triple(Color(0x33FB923C), Color(0xFFFDBA74), Color(0x7AFB923C))
-        else -> Triple(Color.White.copy(alpha = 0.06f), colors.textSecondary, Color.Transparent)
+        1 -> if (colors.isDark) {
+            Triple(Color(0x3DFBBF24), Color(0xFFFDE68A), Color(0x8CFBBF24))
+        } else {
+            Triple(Color(0xFFFEF3C7), Color(0xFF92400E), Color(0xFFD97706))
+        }
+        2 -> if (colors.isDark) {
+            Triple(Color(0x33E2E8F0), Color(0xFFF1F5F9), Color(0x80CBD5E1))
+        } else {
+            Triple(Color(0xFFE2E8F0), Color(0xFF334155), Color(0xFF94A3B8))
+        }
+        3 -> if (colors.isDark) {
+            Triple(Color(0x33FB923C), Color(0xFFFDBA74), Color(0x7AFB923C))
+        } else {
+            Triple(Color(0xFFFFEDD5), Color(0xFF9A3412), Color(0xFFEA580C))
+        }
+        else -> Triple(colors.backgroundSecondary, colors.textSecondary, colors.borderSubtle)
     }
 
     Surface(
         shape = RoundedCornerShape(20.dp),
-        color = colors.elevatedSurface.copy(alpha = 0.94f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.07f)),
+        color = colors.cardBackground,
+        border = BorderStroke(1.dp, colors.borderSubtle),
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
@@ -1284,7 +1307,7 @@ private fun TopAnimeRankRowCard(
             Surface(
                 shape = RoundedCornerShape(11.dp),
                 color = rankBg,
-                border = if (rank <= 3) BorderStroke(1.dp, rankBorder) else null,
+                border = BorderStroke(1.dp, rankBorder),
                 modifier = Modifier.size(width = 38.dp, height = 36.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -1303,7 +1326,7 @@ private fun TopAnimeRankRowCard(
                     .width(52.dp)
                     .height(74.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(10.dp))
+                    .border(1.dp, colors.borderSubtle, RoundedCornerShape(10.dp))
             )
 
             Column(
@@ -1336,12 +1359,12 @@ private fun TopAnimeRankRowCard(
                         item.genres.take(2).forEach { g ->
                             Surface(
                                 shape = CircleShape,
-                                color = Color.White.copy(alpha = 0.055f)
+                                color = colors.backgroundSecondary
                             ) {
                                 Text(
                                     text = g,
                                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                                    color = colors.textMuted,
+                                    color = colors.textSecondary,
                                     modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                                 )
                             }
@@ -1425,13 +1448,13 @@ private fun SlidableTopSourceToggle(
     onSelectSource: (TopAnimeSource) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val crownTint = Color(0xFFA78BFA)
+    val colors = AppTheme.colors
     val selectedIndex = if (source == TopAnimeSource.COMMUNITY) 0 else 1
 
     Surface(
         shape = CircleShape,
-        color = Color.White.copy(alpha = 0.06f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.11f)),
+        color = colors.backgroundSecondary,
+        border = BorderStroke(1.dp, colors.borderSubtle),
         modifier = modifier
             .width(172.dp)
             .height(38.dp)
@@ -1471,8 +1494,8 @@ private fun SlidableTopSourceToggle(
             // Smoothly sliding active capsule pill
             Surface(
                 shape = CircleShape,
-                color = Color(0xFF8B5CF6).copy(alpha = 0.32f),
-                border = BorderStroke(1.dp, crownTint.copy(alpha = 0.55f)),
+                color = colors.accentPrimary.copy(alpha = if (colors.isDark) 0.24f else 0.16f),
+                border = BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.55f)),
                 modifier = Modifier
                     .offset(x = indicatorOffset)
                     .width(slotWidth)
@@ -1483,7 +1506,7 @@ private fun SlidableTopSourceToggle(
                 TopAnimeSource.entries.forEach { src ->
                     val isSelected = source == src
                     val labelColor by animateColorAsState(
-                        targetValue = if (isSelected) Color(0xFFEDE9FE) else Color(0xFFB4B7C9),
+                        targetValue = if (isSelected) colors.highlight else colors.textSecondary,
                         animationSpec = tween(durationMillis = 180),
                         label = "top_source_label_${src.key}"
                     )

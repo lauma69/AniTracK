@@ -15,7 +15,7 @@ private val Context.appPrefsDataStore by preferencesDataStore(name = "anime_univ
 
 data class AppPreferencesState(
     val themeMode: ThemeModePreference = ThemeModePreference.DARK,
-    val accentTheme: String = "COSMIC_CYAN",
+    val accentTheme: String = "CHAMPAGNE_GOLD",
     val watchlistLayout: WatchlistLayoutMode = WatchlistLayoutMode.GRID,
     val notificationsEnabled: Boolean = true,
     val titleLanguage: String = "ENGLISH",
@@ -48,9 +48,14 @@ class PreferencesRepository(context: Context) {
             WatchlistLayoutMode.LIST.name -> WatchlistLayoutMode.LIST
             else -> WatchlistLayoutMode.GRID
         }
+        val rawAccent = prefs[Keys.ACCENT_THEME]
+        val resolvedAccent = when {
+            rawAccent.isNullOrBlank() || rawAccent.equals("COSMIC_CYAN", ignoreCase = true) -> "CHAMPAGNE_GOLD"
+            else -> rawAccent
+        }
         AppPreferencesState(
             themeMode = themeMode,
-            accentTheme = prefs[Keys.ACCENT_THEME] ?: "COSMIC_CYAN",
+            accentTheme = resolvedAccent,
             watchlistLayout = layout,
             notificationsEnabled = prefs[Keys.NOTIFICATIONS_ENABLED] ?: true,
             titleLanguage = prefs[Keys.TITLE_LANGUAGE] ?: "ENGLISH",

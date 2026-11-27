@@ -43,8 +43,74 @@ CREATE INDEX IF NOT EXISTS idx_anime_history_selected_date_desc
     ON public.anime_history (selected_date DESC);
 
 -- ----------------------------------------------------------------------------
--- 3. ATOMIC, IDEMPOTENT DAILY SELECTION RPC (service_role only)
+-- 3. ATOMIC, IDEMPOTENT DAILY SELECTION RPC (IST Midnight Reset + BL/GL Guard)
 -- ----------------------------------------------------------------------------
+
+-- 3.0 Server-side BL / GL / Yaoi / Yuri / missing-metadata exclusion check
+CREATE OR REPLACE FUNCTION public.is_bl_gl_metadata_excluded(
+    p_anime_metadata JSONB
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    v_genres JSONB;
+    v_tags JSONB;
+    v_token TEXT;
+BEGIN
+    IF p_anime_metadata IS NULL OR jsonb_typeof(p_anime_metadata) <> 'object' THEN
+        RETURN TRUE;
+    END IF;
+
+    v_genres := p_anime_metadata -> 'genres';
+    v_tags := p_anime_metadata -> 'tags';
+
+    -- If genre or tag metadata is missing or empty, reject rather than risk recommending BL/GL
+    IF v_genres IS NULL OR jsonb_typeof(v_genres) <> 'array' OR jsonb_array_length(v_genres) = 0 THEN
+        RETURN TRUE;
+    END IF;
+
+    IF v_tags IS NULL OR jsonb_typeof(v_tags) <> 'array' OR jsonb_array_length(v_tags) = 0 THEN
+        RETURN TRUE;
+    END IF;
+
+    FOR v_token IN
+        SELECT lower(regexp_replace(regexp_replace(trim(val), '[’‘`]', '''', 'g'), '[_\-\s]+', ' ', 'g'))
+        FROM (
+            SELECT jsonb_array_elements_text(v_genres) AS val
+            UNION ALL
+            SELECT CASE
+                WHEN jsonb_typeof(elem) = 'string' THEN elem #>> '{}'
+                WHEN jsonb_typeof(elem) = 'object' THEN COALESCE(elem ->> 'name', '')
+                ELSE ''
+            END AS val
+            FROM jsonb_array_elements(v_tags) AS elem
+        ) AS combined
+    LOOP
+        IF v_token IN (
+            'bl',
+            'gl',
+            'yaoi',
+            'yuri',
+            'boys'' love',
+            'boys love',
+            'boy''s love',
+            'girls'' love',
+            'girls love',
+            'girl''s love',
+            'shounen ai',
+            'shonen ai',
+            'shoujo ai',
+            'shojo ai'
+        ) OR v_token ~ '(^|[^a-z0-9])(boys''?\s*love|boy''s\s*love|girls''?\s*love|girl''s\s*love|yaoi|yuri|shou?nen\s*ai|shou?jo\s*ai)([^a-z0-9]|$)' THEN
+            RETURN TRUE;
+        END IF;
+    END LOOP;
+
+    RETURN FALSE;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION public.save_daily_anime_selection(
     p_selection_date DATE,
@@ -90,22 +156,29 @@ BEGIN
         RAISE EXCEPTION 'trailer_id must be a valid 11-character YouTube video ID';
     END IF;
 
-    -- Idempotency check: if today already has a selection, return it without changes
+    IF public.is_bl_gl_metadata_excluded(p_anime_metadata) THEN
+        RAISE EXCEPTION 'BL, GL, Yaoi, Yuri, or incomplete genre/tag metadata is excluded from daily recommendations';
+    END IF;
+
+    -- Idempotency check: if today already has a valid selection, return it without changes
     SELECT * INTO v_existing
     FROM public.daily_anime
     WHERE selection_date = p_selection_date
     LIMIT 1;
 
-    IF FOUND THEN
+    IF FOUND AND NOT public.is_bl_gl_metadata_excluded(v_existing.anime_metadata) AND v_existing.rating >= 60 THEN
         RETURN NEXT v_existing;
         RETURN;
+    ELSIF FOUND THEN
+        DELETE FROM public.daily_anime WHERE id = v_existing.id;
     END IF;
 
     -- Atomically record in anime_history (raises unique_violation if already featured)
     INSERT INTO public.anime_history (anilist_id, selected_date)
-    VALUES (p_anilist_id, p_selection_date);
+    VALUES (p_anilist_id, p_selection_date)
+    ON CONFLICT (anilist_id) DO NOTHING;
 
-    -- Atomically insert into daily_anime (guards against concurrent runs on same UTC date)
+    -- Atomically insert into daily_anime (guards against concurrent runs on same IST date)
     INSERT INTO public.daily_anime (
         selection_date,
         anilist_id,
@@ -158,8 +231,8 @@ GRANT EXECUTE ON FUNCTION public.save_daily_anime_selection(
 ) TO service_role;
 
 -- 3.2 Automatic zero-CLI daily claim RPC (authenticated & service_role)
--- Uses server UTC date ONLY so clients can never backdate, overwrite, or forge picks.
--- Once today's canonical row exists, all callers receive the exact same locked row.
+-- Uses server IST date (Asia/Kolkata, midnight 12:00 AM IST reset) ONLY so clients can never backdate, overwrite, or forge picks.
+-- Once today's canonical IST row exists, all callers receive the exact same locked row.
 CREATE OR REPLACE FUNCTION public.claim_daily_anime_selection(
     p_anilist_id INTEGER,
     p_title TEXT,
@@ -175,19 +248,21 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-    v_today_utc DATE := (NOW() AT TIME ZONE 'UTC')::DATE;
+    v_today_ist DATE := (NOW() AT TIME ZONE 'Asia/Kolkata')::DATE;
     v_existing public.daily_anime%ROWTYPE;
     v_inserted public.daily_anime%ROWTYPE;
 BEGIN
-    -- Always return today's canonical pick immediately if already selected
+    -- Always return today's canonical IST pick immediately if already selected and valid
     SELECT * INTO v_existing
     FROM public.daily_anime
-    WHERE selection_date = v_today_utc
+    WHERE selection_date = v_today_ist
     LIMIT 1;
 
-    IF FOUND THEN
+    IF FOUND AND NOT public.is_bl_gl_metadata_excluded(v_existing.anime_metadata) AND v_existing.rating >= 60 THEN
         RETURN NEXT v_existing;
         RETURN;
+    ELSIF FOUND THEN
+        DELETE FROM public.daily_anime WHERE id = v_existing.id;
     END IF;
 
     -- Require an authenticated session (or service_role) to claim today's empty slot
@@ -211,6 +286,9 @@ BEGIN
     IF p_trailer_id IS NULL OR p_trailer_id !~ '^[A-Za-z0-9_-]{11}$' THEN
         RAISE EXCEPTION 'trailer_id must be a valid 11-character YouTube video ID';
     END IF;
+    IF public.is_bl_gl_metadata_excluded(p_anime_metadata) THEN
+        RAISE EXCEPTION 'BL, GL, Yaoi, Yuri, or incomplete genre/tag metadata is excluded from daily recommendations';
+    END IF;
 
     -- Never repeat a previously featured anime
     IF EXISTS (SELECT 1 FROM public.anime_history WHERE anilist_id = p_anilist_id) THEN
@@ -218,7 +296,7 @@ BEGIN
     END IF;
 
     INSERT INTO public.anime_history (anilist_id, selected_date)
-    VALUES (p_anilist_id, v_today_utc)
+    VALUES (p_anilist_id, v_today_ist)
     ON CONFLICT (anilist_id) DO NOTHING;
 
     INSERT INTO public.daily_anime (
@@ -232,7 +310,7 @@ BEGIN
         anime_metadata
     )
     VALUES (
-        v_today_utc,
+        v_today_ist,
         p_anilist_id,
         left(trim(p_title), 300),
         p_rating,
@@ -247,11 +325,11 @@ BEGIN
     IF v_inserted.id IS NULL THEN
         -- Another concurrent user won today's slot first; roll back our history row and return the winner
         DELETE FROM public.anime_history
-        WHERE anilist_id = p_anilist_id AND selected_date = v_today_utc;
+        WHERE anilist_id = p_anilist_id AND selected_date = v_today_ist;
 
         SELECT * INTO v_existing
         FROM public.daily_anime
-        WHERE selection_date = v_today_utc
+        WHERE selection_date = v_today_ist
         LIMIT 1;
 
         IF FOUND THEN
@@ -313,7 +391,7 @@ REVOKE ALL ON public.anime_history FROM anon, authenticated;
 NOTIFY pgrst, 'reload schema';
 
 -- ----------------------------------------------------------------------------
--- 5. DAILY CRON SCHEDULE (Supabase pg_cron + pg_net)
+-- 5. DAILY CRON SCHEDULE (Supabase pg_cron + pg_net — 12:00 AM IST / 18:30 UTC)
 -- ----------------------------------------------------------------------------
 -- Run the snippet below ONCE in the Supabase SQL Editor after deploying the
 -- `daily-random-anime` Edge Function and setting `CRON_SECRET` as an Edge
@@ -327,7 +405,7 @@ NOTIFY pgrst, 'reload schema';
 --
 --   SELECT cron.schedule(
 --     'daily-random-anime-job',
---     '5 0 * * *', -- Runs once daily at 00:05 UTC
+--     '30 18 * * *', -- Runs once daily at 18:30 UTC (exactly 12:00 AM midnight IST / Asia/Kolkata)
 --     $$
 --     SELECT net.http_post(
 --       url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'project_url')
@@ -336,7 +414,8 @@ NOTIFY pgrst, 'reload schema';
 --         'Content-Type', 'application/json',
 --         'x-cron-secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'daily_anime_cron_secret')
 --       ),
---       body := jsonb_build_object('source', 'pg_cron')
+--       body := jsonb_build_object('source', 'pg_cron_ist_midnight')
 --     ) AS request_id;
 --     $$
 --   );
+

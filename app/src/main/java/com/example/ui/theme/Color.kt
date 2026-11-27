@@ -141,7 +141,7 @@ val LightAppColors = AppColors(
     highlight = LightBronzeSoft,
     textPrimary = LightEspressoInk,
     textSecondary = LightMutedUmber,
-    textMuted = Color(0xFF687084),
+    textMuted = Color(0xFF5D657A),
     borderSubtle = LightHairlineBorder,
     borderStrong = LightEspressoInk.copy(alpha = 0.24f),
     success = LightEmerald,

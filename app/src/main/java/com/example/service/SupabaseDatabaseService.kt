@@ -21,6 +21,7 @@ import com.example.model.VisibilityLevel
 import com.example.model.WatchStatus
 import com.example.util.ErrorSanitizer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -2284,74 +2285,70 @@ class SupabaseDatabaseService {
         }
     }
 
+    private val dailyRandomMutex = kotlinx.coroutines.sync.Mutex()
+
     suspend fun fetchDailyRandomAnime(session: AuthSession?): Result<DailyAnimePick?> = withContext(Dispatchers.IO) {
-        val todayUtc = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString()
-        val token = session?.accessToken?.takeIf { it.isNotBlank() } ?: AppConfig.supabaseAnonKey
-        var latestDbPick: DailyAnimePick? = null
-        val excludedIds = mutableSetOf<Int>()
+        dailyRandomMutex.withLock {
+            val todayIst = DailyAnimeFormatters.getCurrentIstDateString()
+            val token = session?.accessToken?.takeIf { it.isNotBlank() } ?: AppConfig.supabaseAnonKey
+            var latestDbPick: DailyAnimePick? = null
+            val excludedIds = mutableSetOf<Int>()
 
-        // Stage 1: Check Supabase public.daily_anime for today's canonical UTC row
-        if (AppConfig.isSupabaseConfigured) {
-            runCatching {
-                val req = requestBuilder("/rest/v1/daily_anime?select=*&order=selection_date.desc&limit=1", token)
-                    .get()
-                    .build()
-                client.newCall(req).execute().use { resp ->
-                    val body = resp.body?.string().orEmpty()
-                    if (resp.isSuccessful && body.startsWith("[")) {
-                        val arr = JSONArray(body)
-                        if (arr.length() > 0) {
-                            latestDbPick = parseDailyAnimePickJson(arr.getJSONObject(0))
-                        }
-                    }
-                }
-            }
-
-            if (latestDbPick != null && latestDbPick?.selectionDate == todayUtc) {
-                return@withContext Result.success(latestDbPick)
-            }
-
-            // Stage 2: Try Edge Function if deployed
-            if (session != null && session.accessToken.isNotBlank()) {
-                val fnPick = runCatching {
-                    val fnReq = requestBuilder("/functions/v1/daily-random-anime", session.accessToken)
-                        .post("{\"source\":\"client_ensure\"}".toRequestBody("application/json".toMediaType()))
-                        .build()
-                    client.newCall(fnReq).execute().use { fnResp ->
-                        val fnBody = fnResp.body?.string().orEmpty()
-                        if (fnResp.isSuccessful && fnBody.startsWith("{")) {
-                            val root = JSONObject(fnBody)
-                            val obj = root.optJSONObject("data") ?: root.optJSONObject("anime")
-                            obj?.let { parseDailyAnimePickJson(it) }
-                        } else {
-                            null
-                        }
-                    }
-                }.getOrNull()
-                if (fnPick != null && fnPick.anilistId > 0) {
-                    return@withContext Result.success(fnPick)
-                }
-            }
-
-            // Load previously featured anime IDs so repeats are avoided
-            runCatching {
-                val rpcReq = requestBuilder("/rest/v1/rpc/get_featured_anime_ids", token)
-                    .post("{}".toRequestBody("application/json".toMediaType()))
-                    .build()
-                client.newCall(rpcReq).execute().use { resp ->
-                    val body = resp.body?.string().orEmpty()
-                    if (resp.isSuccessful && body.startsWith("[")) {
-                        val arr = JSONArray(body)
-                        for (i in 0 until arr.length()) {
-                            val id = arr.optInt(i, 0)
-                            if (id > 0) excludedIds.add(id)
-                        }
-                    }
-                }
-            }
-            if (excludedIds.isEmpty()) {
+            // Stage 1: Check Supabase public.daily_anime for today's canonical IST row
+            if (AppConfig.isSupabaseConfigured) {
                 runCatching {
-                    val histReq = requestBuilder("/rest/v1/daily_anime?select=anilist_id&limit=1000", token)
+                    val req = requestBuilder(
+                        "/rest/v1/daily_anime?select=*&selection_date=eq.$todayIst&limit=1",
+                        token
+                    )
+                        .get()
+                        .build()
+                    client.newCall(req).execute().use { resp ->
+                        val body = resp.body?.string().orEmpty()
+                        if (resp.isSuccessful && body.startsWith("[")) {
+                            val arr = JSONArray(body)
+                            if (arr.length() > 0) {
+                                latestDbPick = parseDailyAnimePickJson(arr.getJSONObject(0))
+                            }
+                        }
+                    }
+                }
+
+                if (DailyAnimeFormatters.isPickEligibleForDate(latestDbPick, todayIst)) {
+                    return@withLock Result.success(latestDbPick)
+                }
+
+                // Stage 2: Try Edge Function if deployed
+                if (session != null && session.accessToken.isNotBlank()) {
+                    val fnPick = runCatching {
+                        val fnPayload = JSONObject()
+                            .put("source", "client_ensure_ist")
+                            .put("selection_date", todayIst)
+                        val fnReq = requestBuilder("/functions/v1/daily-random-anime", session.accessToken)
+                            .post(fnPayload.toString().toRequestBody("application/json".toMediaType()))
+                            .build()
+                        client.newCall(fnReq).execute().use { fnResp ->
+                            val fnBody = fnResp.body?.string().orEmpty()
+                            if (fnResp.isSuccessful && fnBody.startsWith("{")) {
+                                val root = JSONObject(fnBody)
+                                val obj = root.optJSONObject("data") ?: root.optJSONObject("anime")
+                                obj?.let { parseDailyAnimePickJson(it) }
+                            } else {
+                                null
+                            }
+                        }
+                    }.getOrNull()
+                    if (DailyAnimeFormatters.isPickEligibleForDate(fnPick, todayIst)) {
+                        return@withLock Result.success(fnPick)
+                    }
+                }
+
+                // Load previously featured anime IDs (excluding today's IST date so all users share the exact same candidate pool)
+                runCatching {
+                    val histReq = requestBuilder(
+                        "/rest/v1/daily_anime?select=anilist_id,selection_date&limit=1000",
+                        token
+                    )
                         .get()
                         .build()
                     client.newCall(histReq).execute().use { resp ->
@@ -2359,59 +2356,84 @@ class SupabaseDatabaseService {
                         if (resp.isSuccessful && body.startsWith("[")) {
                             val arr = JSONArray(body)
                             for (i in 0 until arr.length()) {
-                                val id = arr.optJSONObject(i)?.optInt("anilist_id", 0) ?: 0
-                                if (id > 0) excludedIds.add(id)
+                                val rowObj = arr.optJSONObject(i) ?: continue
+                                val rowDate = rowObj.optString("selection_date", "")
+                                val id = rowObj.optInt("anilist_id", 0)
+                                if (id > 0 && rowDate != todayIst) {
+                                    excludedIds.add(id)
+                                }
+                            }
+                        }
+                    }
+                }
+                if (excludedIds.isEmpty()) {
+                    runCatching {
+                        val rpcReq = requestBuilder("/rest/v1/rpc/get_featured_anime_ids", token)
+                            .post("{}".toRequestBody("application/json".toMediaType()))
+                            .build()
+                        client.newCall(rpcReq).execute().use { resp ->
+                            val body = resp.body?.string().orEmpty()
+                            if (resp.isSuccessful && body.startsWith("[")) {
+                                val arr = JSONArray(body)
+                                for (i in 0 until arr.length()) {
+                                    val id = arr.optInt(i, 0)
+                                    if (id > 0 && id != latestDbPick?.anilistId) excludedIds.add(id)
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Stage 3: Complete automatic daily selector (deterministic UTC-date seed + AniList GraphQL + YouTube oEmbed check)
-        val autoCandidate = runCatching {
-            pickAutomaticDailyAnimeRow(todayUtc = todayUtc, excludedIds = excludedIds)
-        }.getOrNull()
+            // Stage 3: Complete automatic daily selector (deterministic IST-date seed + AniList GraphQL BL/GL filter + YouTube oEmbed check)
+            val autoCandidate = runCatching {
+                pickAutomaticDailyAnimeRow(todayIst = todayIst, excludedIds = excludedIds)
+            }.getOrNull()
 
-        if (autoCandidate != null) {
-            // Stage 4: Atomically lock today's pick into Supabase so all users read the canonical DB row
-            if (AppConfig.isSupabaseConfigured && session != null && session.accessToken.isNotBlank()) {
-                val claimed = runCatching {
-                    val rpcPayload = JSONObject()
-                        .put("p_anilist_id", autoCandidate.optInt("anilist_id"))
-                        .put("p_title", autoCandidate.optString("title"))
-                        .put("p_rating", autoCandidate.optInt("rating"))
-                        .put("p_cover_image", autoCandidate.optString("cover_image"))
-                        .put("p_banner_image", autoCandidate.optString("banner_image").ifBlank { JSONObject.NULL })
-                        .put("p_trailer_id", autoCandidate.optString("trailer_id"))
-                        .put("p_anime_metadata", autoCandidate.optJSONObject("anime_metadata") ?: JSONObject())
+            if (autoCandidate != null) {
+                val parsedAutoPick = parseDailyAnimePickJson(autoCandidate)
+                // Secondary validation before saving or displaying
+                if (DailyAnimeFormatters.isPickEligibleForDate(parsedAutoPick, todayIst)) {
+                    // Stage 4: Atomically lock today's IST pick into Supabase so all users read the canonical DB row
+                    if (AppConfig.isSupabaseConfigured && session != null && session.accessToken.isNotBlank()) {
+                        val claimed = runCatching {
+                            val rpcPayload = JSONObject()
+                                .put("p_anilist_id", autoCandidate.optInt("anilist_id"))
+                                .put("p_title", autoCandidate.optString("title"))
+                                .put("p_rating", autoCandidate.optInt("rating"))
+                                .put("p_cover_image", autoCandidate.optString("cover_image"))
+                                .put("p_banner_image", autoCandidate.optString("banner_image").ifBlank { JSONObject.NULL })
+                                .put("p_trailer_id", autoCandidate.optString("trailer_id"))
+                                .put("p_anime_metadata", autoCandidate.optJSONObject("anime_metadata") ?: JSONObject())
 
-                    val claimReq = requestBuilder("/rest/v1/rpc/claim_daily_anime_selection", session.accessToken)
-                        .post(rpcPayload.toString().toRequestBody("application/json".toMediaType()))
-                        .build()
-                    client.newCall(claimReq).execute().use { resp ->
-                        val body = resp.body?.string().orEmpty()
-                        if (resp.isSuccessful && body.startsWith("[")) {
-                            val arr = JSONArray(body)
-                            if (arr.length() > 0) parseDailyAnimePickJson(arr.getJSONObject(0)) else null
-                        } else if (resp.isSuccessful && body.startsWith("{")) {
-                            parseDailyAnimePickJson(JSONObject(body))
-                        } else {
-                            null
+                            val claimReq = requestBuilder("/rest/v1/rpc/claim_daily_anime_selection", session.accessToken)
+                                .post(rpcPayload.toString().toRequestBody("application/json".toMediaType()))
+                                .build()
+                            client.newCall(claimReq).execute().use { resp ->
+                                val body = resp.body?.string().orEmpty()
+                                if (resp.isSuccessful && body.startsWith("[")) {
+                                    val arr = JSONArray(body)
+                                    if (arr.length() > 0) parseDailyAnimePickJson(arr.getJSONObject(0)) else null
+                                } else if (resp.isSuccessful && body.startsWith("{")) {
+                                    parseDailyAnimePickJson(JSONObject(body))
+                                } else {
+                                    null
+                                }
+                            }
+                        }.getOrNull()
+                        if (DailyAnimeFormatters.isPickEligibleForDate(claimed, todayIst)) {
+                            return@withLock Result.success(claimed)
                         }
                     }
-                }.getOrNull()
-                if (claimed != null && claimed.anilistId > 0) {
-                    return@withContext Result.success(claimed)
+                    return@withLock Result.success(parsedAutoPick)
                 }
             }
-            return@withContext Result.success(parseDailyAnimePickJson(autoCandidate))
-        }
 
-        if (latestDbPick != null) {
-            return@withContext Result.success(latestDbPick)
+            if (DailyAnimeFormatters.isPickEligibleForDate(latestDbPick)) {
+                return@withLock Result.success(latestDbPick)
+            }
+            Result.failure(Exception("Unable to load today's featured anime right now. Please try again."))
         }
-        Result.failure(Exception("Unable to load today's featured anime right now. Please try again."))
     }
 
     private class DailyUtcPrng(seedKey: String) {
@@ -2466,8 +2488,8 @@ class SupabaseDatabaseService {
         }
     }
 
-    private fun pickAutomaticDailyAnimeRow(todayUtc: String, excludedIds: Set<Int>): JSONObject? {
-        val prng = DailyUtcPrng("anime-universe-daily-pick-v1:$todayUtc")
+    private fun pickAutomaticDailyAnimeRow(todayIst: String, excludedIds: Set<Int>): JSONObject? {
+        val prng = DailyUtcPrng("anime-universe-daily-ist-v2:$todayIst")
         val pagePool = (1..32).toMutableList()
         for (i in pagePool.lastIndex downTo 1) {
             val j = prng.nextInt(i + 1)
@@ -2484,7 +2506,9 @@ class SupabaseDatabaseService {
                   isAdult: false,
                   averageScore_greater: 59,
                   status_in: [FINISHED, RELEASING],
-                  sort: [POPULARITY_DESC]
+                  genre_not_in: ["Hentai", "Boys' Love", "Girls' Love", "Yaoi", "Yuri", "Shounen Ai", "Shoujo Ai"],
+                  tag_not_in: ["Boys' Love", "Girls' Love", "Yuri", "Yaoi", "Shounen Ai", "Shoujo Ai"],
+                  sort: [POPULARITY_DESC, ID]
                 ) {
                   id
                   title { english romaji native }
@@ -2499,6 +2523,7 @@ class SupabaseDatabaseService {
                   season
                   seasonYear
                   genres
+                  tags { name category }
                   description(asHtml: false)
                   duration
                   source
@@ -2510,7 +2535,7 @@ class SupabaseDatabaseService {
             }
         """.trimIndent()
 
-        for (attempt in 0 until 4) {
+        for (attempt in 0 until 5) {
             val page = pagePool[attempt % pagePool.size]
             val payload = JSONObject()
                 .put("query", query)
@@ -2545,15 +2570,37 @@ class SupabaseDatabaseService {
                 val cover = coverObj?.optString("extraLarge")?.takeIf { it.isNotBlank() && it != "null" }
                     ?: coverObj?.optString("large")?.takeIf { it.isNotBlank() && it != "null" }
                     ?: continue
+                if (cover.isBlank() || (!cover.startsWith("http://", true) && !cover.startsWith("https://", true))) continue
+
+                // Extract and strictly validate genres & tags (reject BL/GL/Yaoi/Yuri or missing metadata)
+                val genresArr = m.optJSONArray("genres") ?: continue
+                val tagsArr = m.optJSONArray("tags") ?: continue
+                val genresList = mutableListOf<String>()
+                for (gIdx in 0 until genresArr.length()) {
+                    val gName = genresArr.optString(gIdx).trim()
+                    if (gName.isNotBlank() && gName != "null") genresList.add(gName)
+                }
+                val tagsList = mutableListOf<String>()
+                for (tIdx in 0 until tagsArr.length()) {
+                    val tObj = tagsArr.optJSONObject(tIdx)
+                    val tName = (tObj?.optString("name") ?: tagsArr.optString(tIdx)).trim()
+                    if (tName.isNotBlank() && tName != "null") tagsList.add(tName)
+                    val tCat = tObj?.optString("category")?.trim().orEmpty()
+                    if (tCat.isNotBlank() && tCat != "null" && DailyAnimeFormatters.isExcludedBlGlToken(tCat)) {
+                        tagsList.add(tCat)
+                    }
+                }
+                if (genresList.isEmpty() || tagsList.isEmpty()) continue
+                if (DailyAnimeFormatters.hasExcludedBlGlGenreOrTag(genresList, tagsList)) continue
+
                 val trailerObj = m.optJSONObject("trailer") ?: continue
                 val trailerSite = trailerObj.optString("site", "").lowercase(java.util.Locale.US)
                 val trailerId = trailerObj.optString("id", "").trim()
                 if (trailerSite != "youtube" || !DailyAnimeFormatters.isValidYouTubeId(trailerId)) continue
-                if (cover.isBlank()) continue
                 candidates.add(m)
             }
 
-            // Deterministic Fisher-Yates shuffle seeded by today's UTC date
+            // Deterministic Fisher-Yates shuffle seeded by today's IST date
             for (i in candidates.lastIndex downTo 1) {
                 val j = prng.nextInt(i + 1)
                 val tmp = candidates[i]
@@ -2587,6 +2634,15 @@ class SupabaseDatabaseService {
                         if (!sName.isNullOrBlank() && sName != "null") studiosArr.put(sName)
                     }
                 }
+                val tagsJsonArr = JSONArray()
+                val rawTagsArr = m.optJSONArray("tags")
+                if (rawTagsArr != null) {
+                    for (tIdx in 0 until rawTagsArr.length()) {
+                        val tObj = rawTagsArr.optJSONObject(tIdx)
+                        val tName = (tObj?.optString("name") ?: rawTagsArr.optString(tIdx)).trim()
+                        if (tName.isNotBlank() && tName != "null") tagsJsonArr.put(tName)
+                    }
+                }
                 val startDateStr = formatFuzzyDateObj(m.optJSONObject("startDate"))
                 val endDateStr = formatFuzzyDateObj(m.optJSONObject("endDate"))
                 val seasonYear = m.optInt("seasonYear", -1).takeIf { it > 0 }
@@ -2612,6 +2668,7 @@ class SupabaseDatabaseService {
                     .put("season", m.optString("season").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
                     .put("season_year", seasonYear ?: JSONObject.NULL)
                     .put("genres", m.optJSONArray("genres") ?: JSONArray())
+                    .put("tags", tagsJsonArr)
                     .put("description", m.optString("description", ""))
                     .put("duration", if (m.isNull("duration")) JSONObject.NULL else m.optInt("duration"))
                     .put("source", m.optString("source").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
@@ -2620,8 +2677,8 @@ class SupabaseDatabaseService {
                     .put("trailer", JSONObject().put("id", trailerId).put("site", "youtube"))
 
                 return JSONObject()
-                    .put("id", "auto-$todayUtc-$id")
-                    .put("selection_date", todayUtc)
+                    .put("id", "auto-$todayIst-$id")
+                    .put("selection_date", todayIst)
                     .put("anilist_id", id)
                     .put("title", displayTitle)
                     .put("rating", score)
@@ -2662,6 +2719,16 @@ class SupabaseDatabaseService {
                 }
             }
         }
+        val tags = buildList {
+            val tArr = meta.optJSONArray("tags")
+            if (tArr != null) {
+                for (i in 0 until tArr.length()) {
+                    val tObj = tArr.optJSONObject(i)
+                    val tName = (tObj?.optString("name") ?: tArr.optString(i)).trim()
+                    if (tName.isNotBlank() && tName != "null") add(tName)
+                }
+            }
+        }
         val studios = buildList {
             val sArr = meta.optJSONArray("studios")
             if (sArr != null) {
@@ -2695,6 +2762,7 @@ class SupabaseDatabaseService {
             studios = studios,
             countryOfOrigin = meta.optString("country_of_origin").takeIf { it.isNotBlank() && it != "null" },
             genres = genres,
+            tags = tags,
             description = DailyAnimeFormatters.stripHtml(meta.optString("description", ""))
         )
     }
