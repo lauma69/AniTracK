@@ -838,6 +838,7 @@ data class DailyAnimePick(
     val countryOfOrigin: String? = null,
     val genres: List<String> = emptyList(),
     val tags: List<String> = emptyList(),
+    val isEntryPoint: Boolean = true,
     val description: String = ""
 ) {
     val rating10Text: String
@@ -932,6 +933,24 @@ object DailyAnimeFormatters {
         "(^|[^a-z0-9])(boys'?\\s*love|boy's\\s*love|girls'?\\s*love|girl's\\s*love|yaoi|yuri|shou?nen\\s*ai|shou?jo\\s*ai)([^a-z0-9]|$)"
     )
 
+    private val SEQUEL_OR_MOVIE_TITLE_REGEX = Regex(
+        listOf(
+            "\\bseason\\s*(?:0*[2-9]|\\d{2,}|ii|iii|iv|v|vi|vii|viii|ix|x)\\b",
+            "\\b(?:2nd|3rd|[4-9]th|\\d{2,}th|second|third|fourth|fifth|sixth|final|last|climax)\\s+(?:season|series|cour|part|chapter|arc|act)\\b",
+            "\\b(?:part|cour|act|chapter|phase|stage)\\s*(?:0*[2-9]|\\d{2,}|ii|iii|iv|v|vi)\\b",
+            "\\bs(?:0*[2-9]|\\d{2,})\\b",
+            "\\b(?:the\\s+movie|movie\\b|film\\b|ova\\b|oad\\b|recap\\b|special\\b|spin[\\s\\-]*off\\b|side[\\s\\-]*story\\b)",
+            "\\b(?:shippu?den|next\\s+generations|thousand[\\s\\-]year\\s+blood\\s+war|entertainment\\s+district\\s+arc|swordsmith\\s+village\\s+arc|hashira\\s+training\\s+arc|mugen\\s+train\\s+arc|culling\\s+game|shibuya\\s+incident)\\b",
+            "(?:\\s+|:|-)(?:ii|iii|iv|v|vi|r2)(?:\\s*$|\\s*[:\\-])"
+        ).joinToString("|"),
+        RegexOption.IGNORE_CASE
+    )
+
+    fun isSequelOrMovieTitle(rawTitle: String?): Boolean {
+        if (rawTitle.isNullOrBlank()) return false
+        return SEQUEL_OR_MOVIE_TITLE_REGEX.containsMatchIn(rawTitle.trim())
+    }
+
     fun getCurrentIstDateString(): String {
         return java.time.LocalDate.now(IST_ZONE).toString()
     }
@@ -971,6 +990,10 @@ object DailyAnimeFormatters {
         if (pick == null) return false
         if (pick.anilistId <= 0) return false
         if (pick.title.isBlank() || pick.title == "Unknown") return false
+        if (!pick.isEntryPoint) return false
+        // Only mainline first-season TV series (never movies, OVAs, specials, or sequel seasons)
+        if (pick.rawFormat?.trim()?.uppercase(java.util.Locale.US) != "TV") return false
+        if (isSequelOrMovieTitle(pick.title) || isSequelOrMovieTitle(pick.secondaryTitle)) return false
         if (!pick.coverImage.startsWith("http://", ignoreCase = true) &&
             !pick.coverImage.startsWith("https://", ignoreCase = true)
         ) {

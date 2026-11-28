@@ -2488,8 +2488,45 @@ class SupabaseDatabaseService {
         }
     }
 
+    private fun fuzzyDateToSortableInt(obj: JSONObject?): Int {
+        if (obj == null) return 0
+        val y = obj.optInt("year", 0)
+        if (y <= 0) return 0
+        val m = obj.optInt("month", 1).coerceIn(1, 12)
+        val d = obj.optInt("day", 1).coerceIn(1, 31)
+        return y * 10000 + m * 100 + d
+    }
+
+    private fun hasSequelOrDerivativeRelation(mediaObj: JSONObject): Boolean {
+        val edges = mediaObj.optJSONObject("relations")?.optJSONArray("edges") ?: return false
+        val candidateDate = fuzzyDateToSortableInt(mediaObj.optJSONObject("startDate"))
+            .takeIf { it > 0 }
+            ?: (mediaObj.optInt("seasonYear", 0).takeIf { it > 0 }?.times(10000) ?: 0)
+
+        for (i in 0 until edges.length()) {
+            val edge = edges.optJSONObject(i) ?: continue
+            val node = edge.optJSONObject("node") ?: continue
+            if (node.optString("type", "").uppercase(java.util.Locale.US) != "ANIME") continue
+            val relType = edge.optString("relationType", "").uppercase(java.util.Locale.US)
+            val nodeFormat = node.optString("format", "").uppercase(java.util.Locale.US)
+            val nodeDate = fuzzyDateToSortableInt(node.optJSONObject("startDate"))
+
+            if (relType == "PARENT" || relType == "FULL_STORY") {
+                return true
+            }
+            if (relType == "PREQUEL") {
+                if (nodeFormat == "TV") {
+                    if (candidateDate == 0 || nodeDate == 0 || nodeDate <= candidateDate) return true
+                } else if (nodeFormat == "TV_SHORT" || nodeFormat == "ONA" || nodeFormat == "MOVIE") {
+                    if (candidateDate > 0 && nodeDate > 0 && nodeDate <= candidateDate) return true
+                }
+            }
+        }
+        return false
+    }
+
     private fun pickAutomaticDailyAnimeRow(todayIst: String, excludedIds: Set<Int>): JSONObject? {
-        val prng = DailyUtcPrng("anime-universe-daily-ist-v2:$todayIst")
+        val prng = DailyUtcPrng("anime-universe-daily-ist-v3-entrypoint:$todayIst")
         val pagePool = (1..32).toMutableList()
         for (i in pagePool.lastIndex downTo 1) {
             val j = prng.nextInt(i + 1)
@@ -2504,6 +2541,7 @@ class SupabaseDatabaseService {
                 media(
                   type: ANIME,
                   isAdult: false,
+                  format_in: [TV],
                   averageScore_greater: 59,
                   status_in: [FINISHED, RELEASING],
                   genre_not_in: ["Hentai", "Boys' Love", "Girls' Love", "Yaoi", "Yuri", "Shounen Ai", "Shoujo Ai"],
@@ -2524,6 +2562,17 @@ class SupabaseDatabaseService {
                   seasonYear
                   genres
                   tags { name category }
+                  relations {
+                    edges {
+                      relationType(version: 2)
+                      node {
+                        id
+                        type
+                        format
+                        startDate { year month day }
+                      }
+                    }
+                  }
                   description(asHtml: false)
                   duration
                   source
@@ -2561,11 +2610,23 @@ class SupabaseDatabaseService {
                 val id = m.optInt("id", 0)
                 val score = m.optInt("averageScore", -1)
                 if (id <= 0 || id in excludedIds || score < 60 || score > 100) continue
+                // Only mainline first-season TV series (never movies, OVAs, specials, or sequel seasons)
+                val format = m.optString("format", "").trim().uppercase(java.util.Locale.US)
+                if (format != "TV") continue
+                if (hasSequelOrDerivativeRelation(m)) continue
+
                 val titleObj = m.optJSONObject("title")
                 val english = titleObj?.optString("english")?.takeIf { it.isNotBlank() && it != "null" }
                 val romaji = titleObj?.optString("romaji")?.takeIf { it.isNotBlank() && it != "null" }
                 val nativeTitle = titleObj?.optString("native")?.takeIf { it.isNotBlank() && it != "null" }
                 if (english == null && romaji == null && nativeTitle == null) continue
+                if (DailyAnimeFormatters.isSequelOrMovieTitle(english) ||
+                    DailyAnimeFormatters.isSequelOrMovieTitle(romaji) ||
+                    DailyAnimeFormatters.isSequelOrMovieTitle(nativeTitle)
+                ) {
+                    continue
+                }
+
                 val coverObj = m.optJSONObject("coverImage")
                 val cover = coverObj?.optString("extraLarge")?.takeIf { it.isNotBlank() && it != "null" }
                     ?: coverObj?.optString("large")?.takeIf { it.isNotBlank() && it != "null" }
@@ -2669,6 +2730,7 @@ class SupabaseDatabaseService {
                     .put("season_year", seasonYear ?: JSONObject.NULL)
                     .put("genres", m.optJSONArray("genres") ?: JSONArray())
                     .put("tags", tagsJsonArr)
+                    .put("is_entry_point", true)
                     .put("description", m.optString("description", ""))
                     .put("duration", if (m.isNull("duration")) JSONObject.NULL else m.optInt("duration"))
                     .put("source", m.optString("source").takeIf { it.isNotBlank() && it != "null" } ?: JSONObject.NULL)
@@ -2737,6 +2799,11 @@ class SupabaseDatabaseService {
                 }
             }
         }
+        val isEntryPoint = meta.optBoolean("is_entry_point", true) &&
+            !hasSequelOrDerivativeRelation(meta) &&
+            !DailyAnimeFormatters.isSequelOrMovieTitle(titleEnglish) &&
+            !DailyAnimeFormatters.isSequelOrMovieTitle(titleRomaji) &&
+            !DailyAnimeFormatters.isSequelOrMovieTitle(displayTitle)
 
         return DailyAnimePick(
             id = row.optString("id", ""),
@@ -2763,6 +2830,7 @@ class SupabaseDatabaseService {
             countryOfOrigin = meta.optString("country_of_origin").takeIf { it.isNotBlank() && it != "null" },
             genres = genres,
             tags = tags,
+            isEntryPoint = isEntryPoint,
             description = DailyAnimeFormatters.stripHtml(meta.optString("description", ""))
         )
     }

@@ -5487,6 +5487,507 @@ svg {
 }
 
 /* ==========================================================================
+   COMMUNITY — RANDOM SECTION CATEGORY SWITCHER & MY SHUFFLE (3D Deck & Swipe)
+   ========================================================================== */
+
+.random-category-bar-card {
+  padding: 14px 16px;
+  border-radius: 22px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.random-category-bar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.random-category-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.random-category-kicker {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--highlight);
+}
+
+.random-category-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.random-category-toggle {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  user-select: none;
+}
+
+.random-category-slider {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border-radius: 999px;
+  background: var(--accent-soft-strong);
+  box-shadow: inset 0 0 0 1px var(--accent-border), 0 4px 12px var(--accent-glow);
+  pointer-events: none;
+  z-index: 0;
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.random-category-slider.is-daily {
+  transform: translate3d(0%, 0, 0);
+}
+
+.random-category-slider.is-shuffle {
+  transform: translate3d(100%, 0, 0);
+}
+
+.random-category-btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 180ms ease;
+}
+
+.random-category-btn.active {
+  color: var(--highlight);
+}
+
+.my-shuffle-deck-wrapper {
+  position: relative;
+  perspective: 1400px;
+  margin-bottom: 18px;
+}
+
+.my-shuffle-deck-backplate {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: -7px;
+  height: 38px;
+  border-radius: 28px;
+  background: var(--card-bg);
+  border: 1px solid var(--accent-border);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.my-shuffle-card {
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
+  transform-style: preserve-3d;
+  will-change: transform, opacity;
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), border-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+}
+
+.my-shuffle-hero-banner {
+  height: 190px;
+  opacity: 0.22;
+}
+
+.my-shuffle-card-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.my-shuffle-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.my-shuffle-badge-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.my-shuffle-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+}
+
+.my-shuffle-showcase-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.my-shuffle-poster-frame {
+  position: relative;
+  width: 126px;
+  height: 182px;
+  flex-shrink: 0;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid var(--accent-border);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.26);
+}
+
+.my-shuffle-poster-frame .my-shuffle-poster {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 18px;
+  border: none;
+  display: block;
+}
+
+.my-shuffle-poster-format-tag {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(11, 14, 22, 0.84);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--accent-border);
+  color: #ffffff;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.my-shuffle-anime-title {
+  font-size: 23px;
+  line-height: 1.18;
+  margin: 0;
+}
+
+.my-shuffle-highlight-pills {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.my-shuffle-specs-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 12px;
+  border-radius: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.my-shuffle-spec-cell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  text-align: center;
+}
+
+.my-shuffle-spec-label {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.my-shuffle-spec-val {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.my-shuffle-spec-val.is-accent {
+  color: var(--highlight);
+}
+
+.my-shuffle-spec-divider {
+  width: 1px;
+  height: 26px;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.my-shuffle-synopsis-box {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.my-shuffle-synopsis-label {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.my-shuffle-synopsis-text {
+  margin: 0;
+}
+
+.my-shuffle-subactions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.my-shuffle-controls-bar {
+  display: flex;
+  align-items: center;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.my-shuffle-primary-btn {
+  width: 100%;
+  height: 50px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-primary);
+  color: var(--on-accent);
+  font-size: 13.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  box-shadow: 0 10px 24px var(--accent-glow);
+  transition: transform 150ms ease, filter 150ms ease, opacity 150ms ease;
+}
+
+.my-shuffle-primary-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.my-shuffle-primary-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.my-shuffle-primary-btn:disabled {
+  opacity: 0.84;
+  cursor: not-allowed;
+}
+
+.my-shuffle-dice-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  will-change: transform;
+}
+
+.my-shuffle-dice-icon-wrap.is-rolling {
+  animation: auInlineDiceSpin 340ms cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+/* Full-Card Dust Disintegration & Re-Materialization Animation */
+.my-shuffle-dust-canvas {
+  position: absolute;
+  inset: -20px;
+  width: calc(100% + 40px);
+  height: calc(100% + 40px);
+  pointer-events: none;
+  z-index: 8;
+}
+
+.my-shuffle-card.is-dust-dissolve {
+  animation: auCardTurnToDust 320ms cubic-bezier(0.36, 0.04, 0.86, 0.52) forwards;
+}
+
+.my-shuffle-card.is-dust-materialize {
+  animation: auCardAppearFromDust 380ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.my-shuffle-card.is-dust-materialize .my-shuffle-info-animate {
+  animation: auShuffleInfoReveal 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.my-shuffle-card.is-dust-materialize .my-shuffle-poster {
+  animation: auShufflePosterReveal 300ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes auCardTurnToDust {
+  0% {
+    opacity: 1;
+    filter: blur(0px) contrast(1);
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  45% {
+    opacity: 0.62;
+    filter: blur(4px) contrast(1.12);
+    transform: translate3d(10px, -7px, 0) scale(1.012);
+  }
+  100% {
+    opacity: 0.02;
+    filter: blur(12px) contrast(1.25);
+    transform: translate3d(26px, -18px, 0) scale(1.03);
+  }
+}
+
+@keyframes auCardAppearFromDust {
+  0% {
+    opacity: 0.03;
+    filter: blur(12px) contrast(1.2);
+    transform: translate3d(-18px, 14px, 0) scale(0.962);
+  }
+  55% {
+    opacity: 0.82;
+    filter: blur(3px) contrast(1.04);
+    transform: translate3d(-3px, 2px, 0) scale(0.994);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0px) contrast(1);
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes auInlineDiceSpin {
+  0% {
+    transform: rotate(0deg) scale(0.92);
+  }
+  50% {
+    transform: rotate(190deg) scale(1.12);
+  }
+  100% {
+    transform: rotate(360deg) scale(1);
+  }
+}
+
+@keyframes auShuffleInfoReveal {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes auShufflePosterReveal {
+  0% {
+    opacity: 0.35;
+    transform: scale(0.94);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.my-shuffle-transition-state {
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.my-shuffle-shuffling-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 6px 13px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--highlight);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.my-shuffle-inline-rolling-die {
+  display: inline-flex;
+  animation: auInlineDiceSpin 560ms linear infinite;
+}
+
+@media (max-width: 480px) {
+  .my-shuffle-showcase-row {
+    gap: 13px;
+  }
+  .my-shuffle-poster-frame {
+    width: 110px;
+    height: 160px;
+  }
+  .my-shuffle-anime-title {
+    font-size: 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .random-category-slider,
+  .my-shuffle-card,
+  .my-shuffle-card.is-dust-dissolve,
+  .my-shuffle-card.is-dust-materialize,
+  .my-shuffle-card.is-dust-materialize .my-shuffle-info-animate,
+  .my-shuffle-card.is-dust-materialize .my-shuffle-poster,
+  .my-shuffle-dice-icon-wrap.is-rolling,
+  .my-shuffle-inline-rolling-die {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+    filter: none !important;
+  }
+}
+
+/* ==========================================================================
    COMMUNITY — TOP ANIME SECTION (Unified Theme & Accent Tokens)
    ========================================================================== */
 

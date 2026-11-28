@@ -46,7 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_anime_history_selected_date_desc
 -- 3. ATOMIC, IDEMPOTENT DAILY SELECTION RPC (IST Midnight Reset + BL/GL Guard)
 -- ----------------------------------------------------------------------------
 
--- 3.0 Server-side BL / GL / Yaoi / Yuri / missing-metadata exclusion check
+-- 3.0 Server-side BL / GL / Yaoi / Yuri / Movie / Season 2+ sequel / missing-metadata exclusion check
 CREATE OR REPLACE FUNCTION public.is_bl_gl_metadata_excluded(
     p_anime_metadata JSONB
 )
@@ -58,8 +58,29 @@ DECLARE
     v_genres JSONB;
     v_tags JSONB;
     v_token TEXT;
+    v_format TEXT;
+    v_title_en TEXT;
+    v_title_ro TEXT;
+    v_sequel_movie_pattern TEXT := '(\mseason\s*(0*[2-9]|\d{2,}|ii|iii|iv|v|vi|vii|viii|ix|x)\M|\m(2nd|3rd|[4-9]th|\d{2,}th|second|third|fourth|fifth|sixth|final|last|climax)\s+(season|series|cour|part|chapter|arc|act)\M|\m(part|cour|act|chapter|phase|stage)\s*(0*[2-9]|\d{2,}|ii|iii|iv|v|vi)\M|\ms(0*[2-9]|\d{2,})\M|\m(the\s+movie|movie|film|ova|oad|recap|special|spin[\s\-]*off|side[\s\-]*story)\M|\m(shippu?den|next\s+generations|thousand[\s\-]year\s+blood\s+war|entertainment\s+district\s+arc|swordsmith\s+village\s+arc|hashira\s+training\s+arc|mugen\s+train\s+arc|culling\s+game|shibuya\s+incident)\M)';
 BEGIN
     IF p_anime_metadata IS NULL OR jsonb_typeof(p_anime_metadata) <> 'object' THEN
+        RETURN TRUE;
+    END IF;
+
+    -- Must be a Season 1 / standalone TV series (exclude MOVIE, OVA, ONA, SPECIAL, TV_SHORT, and sequels)
+    v_format := upper(trim(COALESCE(p_anime_metadata ->> 'format', '')));
+    IF v_format <> 'TV' THEN
+        RETURN TRUE;
+    END IF;
+
+    IF COALESCE((p_anime_metadata ->> 'is_entry_point')::BOOLEAN, TRUE) = FALSE THEN
+        RETURN TRUE;
+    END IF;
+
+    v_title_en := lower(trim(COALESCE(p_anime_metadata #>> '{title,english}', '')));
+    v_title_ro := lower(trim(COALESCE(p_anime_metadata #>> '{title,romaji}', '')));
+    IF (v_title_en <> '' AND v_title_en ~* v_sequel_movie_pattern)
+       OR (v_title_ro <> '' AND v_title_ro ~* v_sequel_movie_pattern) THEN
         RETURN TRUE;
     END IF;
 

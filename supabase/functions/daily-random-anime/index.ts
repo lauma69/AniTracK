@@ -32,6 +32,78 @@ const EXCLUDED_BL_GL_EXACT_TOKENS = new Set([
 const EXCLUDED_BL_GL_PHRASE_REGEX =
   /(^|[^a-z0-9])(boys'?\s*love|boy's\s*love|girls'?\s*love|girl's\s*love|yaoi|yuri|shou?nen\s*ai|shou?jo\s*ai)([^a-z0-9]|$)/i;
 
+const SEQUEL_OR_MOVIE_TITLE_REGEX = new RegExp(
+  [
+    "\\bseason\\s*(?:0*[2-9]|\\d{2,}|ii|iii|iv|v|vi|vii|viii|ix|x)\\b",
+    "\\b(?:2nd|3rd|[4-9]th|\\d{2,}th|second|third|fourth|fifth|sixth|final|last|climax)\\s+(?:season|series|cour|part|chapter|arc|act)\\b",
+    "\\b(?:part|cour|act|chapter|phase|stage)\\s*(?:0*[2-9]|\\d{2,}|ii|iii|iv|v|vi)\\b",
+    "\\bs(?:0*[2-9]|\\d{2,})\\b",
+    "\\b(?:the\\s+movie|movie\\b|film\\b|ova\\b|oad\\b|recap\\b|special\\b|spin[\\s\\-]*off\\b|side[\\s\\-]*story\\b)",
+    "\\b(?:shippu?den|next\\s+generations|thousand[\\s\\-]year\\s+blood\\s+war|entertainment\\s+district\\s+arc|swordsmith\\s+village\\s+arc|hashira\\s+training\\s+arc|mugen\\s+train\\s+arc|culling\\s+game|shibuya\\s+incident)\\b",
+    "(?:\\s+|:|-)(?:ii|iii|iv|v|vi|r2)(?:\\s*$|\\s*[:\\-])",
+  ].join("|"),
+  "i"
+);
+
+function isSequelOrMovieTitle(rawTitle: string | null | undefined): boolean {
+  if (!rawTitle) return false;
+  const cleaned = String(rawTitle).trim();
+  if (!cleaned) return false;
+  return SEQUEL_OR_MOVIE_TITLE_REGEX.test(cleaned);
+}
+
+function fuzzyDateToSortableInt(d?: AniListFuzzyDate | null): number {
+  if (!d || typeof d.year !== "number" || d.year <= 0) return 0;
+  const m = Math.max(1, Math.min(12, Number(d.month ?? 1)));
+  const day = Math.max(1, Math.min(31, Number(d.day ?? 1)));
+  return d.year * 10000 + m * 100 + day;
+}
+
+function hasSequelOrDerivativeRelation(candidate: {
+  startDate?: AniListFuzzyDate | null;
+  relations?: {
+    edges?: Array<{
+      relationType?: string | null;
+      node?: {
+        id?: number | null;
+        type?: string | null;
+        format?: string | null;
+        startDate?: AniListFuzzyDate | null;
+      } | null;
+    } | null> | null;
+  } | null;
+}): boolean {
+  const edges = candidate?.relations?.edges;
+  if (!Array.isArray(edges)) return false;
+  const candidateDate = fuzzyDateToSortableInt(candidate.startDate);
+  for (const edge of edges) {
+    if (!edge) continue;
+    const rel = String(edge.relationType ?? "").trim().toUpperCase();
+    const node = edge.node;
+    const nodeType = String(node?.type ?? "").trim().toUpperCase();
+    const nodeFormat = String(node?.format ?? "").trim().toUpperCase();
+    const nodeDate = fuzzyDateToSortableInt(node?.startDate);
+    if (nodeType !== "ANIME") continue;
+
+    if (rel === "PARENT" || rel === "FULL_STORY") {
+      return true;
+    }
+
+    if (rel === "PREQUEL") {
+      if (nodeFormat === "TV") {
+        if (!candidateDate || !nodeDate || nodeDate <= candidateDate) {
+          return true;
+        }
+      } else if (nodeFormat === "TV_SHORT" || nodeFormat === "ONA" || nodeFormat === "MOVIE") {
+        if (candidateDate > 0 && nodeDate > 0 && nodeDate <= candidateDate) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 const ANILIST_DAILY_POOL_QUERY = `
 query ($page: Int!, $perPage: Int!, $sort: [MediaSort]) {
   Page(page: $page, perPage: $perPage) {
@@ -43,6 +115,7 @@ query ($page: Int!, $perPage: Int!, $sort: [MediaSort]) {
     }
     media(
       type: ANIME
+      format_in: [TV]
       isAdult: false
       averageScore_greater: 59
       genre_not_in: ["Hentai", "Boys' Love", "Girls' Love", "Yaoi", "Yuri", "Shounen Ai", "Shoujo Ai"]
@@ -96,6 +169,21 @@ query ($page: Int!, $perPage: Int!, $sort: [MediaSort]) {
         site
         thumbnail
       }
+      relations {
+        edges {
+          relationType(version: 2)
+          node {
+            id
+            type
+            format
+            startDate {
+              year
+              month
+              day
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -146,6 +234,17 @@ interface AniListMediaCandidate {
     id?: string | null;
     site?: string | null;
     thumbnail?: string | null;
+  } | null;
+  relations?: {
+    edges?: Array<{
+      relationType?: string | null;
+      node?: {
+        id?: number | null;
+        type?: string | null;
+        format?: string | null;
+        startDate?: AniListFuzzyDate | null;
+      } | null;
+    } | null> | null;
   } | null;
 }
 
@@ -398,6 +497,22 @@ function isCandidateMetadataValid(
     "";
   if (!displayTitle) return false;
 
+  // Only Season 1 / standalone TV entry-point anime (no movies, OVAs, specials, or Season 2/3+ sequels)
+  if (String(candidate.format ?? "").trim().toUpperCase() !== "TV") {
+    return false;
+  }
+  if (hasSequelOrDerivativeRelation(candidate)) {
+    return false;
+  }
+  if (
+    isSequelOrMovieTitle(displayTitle) ||
+    isSequelOrMovieTitle(candidate.title?.english) ||
+    isSequelOrMovieTitle(candidate.title?.romaji) ||
+    isSequelOrMovieTitle(candidate.title?.native)
+  ) {
+    return false;
+  }
+
   const cover = candidate.coverImage?.extraLarge?.trim() || candidate.coverImage?.large?.trim() || "";
   if (!cover || !/^https?:\/\//i.test(cover)) return false;
 
@@ -433,7 +548,8 @@ function buildStoredMetadata(candidate: AniListMediaCandidate, trailerId: string
     start_date: formatFuzzyDate(candidate.startDate),
     end_date: formatFuzzyDate(candidate.endDate),
     status: candidate.status || null,
-    format: candidate.format || null,
+    format: candidate.format || "TV",
+    is_entry_point: true,
     season: candidate.season || null,
     season_year: candidate.seasonYear ?? candidate.startDate?.year ?? null,
     genres,
@@ -513,7 +629,7 @@ serve(async (req: Request) => {
   const todayIst = getIstDateString();
 
   try {
-    // 1. Idempotency check: return today's IST selection if already chosen and valid (non-BL/GL, score >= 60)
+    // 1. Idempotency check: return today's IST selection if already chosen and valid (non-BL/GL, score >= 60, Season 1 TV entry-point)
     const { data: existingToday, error: existingErr } = await adminClient
       .from("daily_anime")
       .select("*")
@@ -527,6 +643,11 @@ serve(async (req: Request) => {
     if (
       existingToday &&
       Number(existingToday.rating ?? 0) >= MIN_ANILIST_SCORE &&
+      String(existingToday?.anime_metadata?.format ?? "").trim().toUpperCase() === "TV" &&
+      existingToday?.anime_metadata?.is_entry_point !== false &&
+      !isSequelOrMovieTitle(existingToday?.title) &&
+      !isSequelOrMovieTitle(existingToday?.anime_metadata?.title?.english) &&
+      !isSequelOrMovieTitle(existingToday?.anime_metadata?.title?.romaji) &&
       !hasExcludedBlGlGenreOrTag(
         existingToday?.anime_metadata?.genres,
         existingToday?.anime_metadata?.tags

@@ -112,6 +112,13 @@ fun RandomAnimeOfTheDaySection(
     error: String?,
     onRetry: () -> Unit,
     onSelectAnime: (Int) -> Unit,
+    selectedCategory: RandomSectionCategory = RandomSectionCategory.DAILY_PICK,
+    onSelectCategory: (RandomSectionCategory) -> Unit = {},
+    myShuffleItem: com.example.service.MyShuffleAnimeItem? = null,
+    isMyShuffleLoading: Boolean = false,
+    myShuffleError: String? = null,
+    myShuffleSequence: Int = 0,
+    onShuffleAgain: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colors = AppTheme.colors
@@ -119,6 +126,16 @@ fun RandomAnimeOfTheDaySection(
     var detailsExpanded by rememberSaveable(pick?.selectionDate, pick?.anilistId) { mutableStateOf(false) }
     var trailerPlaying by rememberSaveable(pick?.selectionDate, pick?.anilistId) { mutableStateOf(false) }
     var trailerEmbedFailed by rememberSaveable(pick?.selectionDate, pick?.anilistId) { mutableStateOf(false) }
+
+    // Automatically load or silently auto-retry when pick is not yet available (no manual Refresh button)
+    androidx.compose.runtime.LaunchedEffect(pick, isLoading, error) {
+        if (pick == null && !isLoading) {
+            if (!error.isNullOrBlank()) {
+                kotlinx.coroutines.delay(2500L)
+            }
+            onRetry()
+        }
+    }
 
     Column(
         modifier = modifier
@@ -128,84 +145,24 @@ fun RandomAnimeOfTheDaySection(
             .testTag("community_random_section"),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.md)
     ) {
-        when {
-            isLoading && pick == null -> {
-                RandomAnimeSkeletonCard()
-            }
-            !error.isNullOrBlank() && pick == null -> {
-                AppCard(shape = RoundedCornerShape(24.dp)) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(AppSpacing.xl),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Text(
-                            text = "Random Anime of the Day",
-                            fontFamily = CormorantSerifFamily,
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = colors.textPrimary,
-                            textAlign = TextAlign.Center
-                        )
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.textSecondary,
-                            textAlign = TextAlign.Center
-                        )
-                        AppPrimaryButton(
-                            text = "Try Again",
-                            onClick = onRetry,
-                            modifier = Modifier.testTag("random_anime_retry_button")
-                        )
-                    }
-                }
-            }
+        // Two categories inside Random section: 1. Daily Pick | 2. My Shuffle
+        RandomSectionCategorySwitcher(
+            selectedCategory = selectedCategory,
+            onSelectCategory = onSelectCategory
+        )
+
+        if (selectedCategory == RandomSectionCategory.MY_SHUFFLE) {
+            MyShuffleSectionContent(
+                item = myShuffleItem,
+                isLoading = isMyShuffleLoading,
+                error = myShuffleError,
+                shuffleSequence = myShuffleSequence,
+                onShuffleAgain = onShuffleAgain,
+                onSelectAnime = onSelectAnime
+            )
+        } else when {
             pick == null -> {
-                AppCard(shape = RoundedCornerShape(24.dp)) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(AppSpacing.xl),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = colors.accentPrimary.copy(alpha = 0.16f),
-                            border = BorderStroke(1.dp, colors.accentPrimary.copy(alpha = 0.5f))
-                        ) {
-                            Text(
-                                text = "TODAY'S PICK",
-                                style = MicroUpperLabel.copy(fontWeight = FontWeight.Bold),
-                                color = colors.highlight,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                            )
-                        }
-                        Text(
-                            text = "Random Anime of the Day",
-                            fontFamily = CormorantSerifFamily,
-                            fontSize = 25.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = colors.textPrimary,
-                            textAlign = TextAlign.Center
-                        )
-                        Text(
-                            text = "Today's featured anime selection is being prepared. Check back shortly!",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.textSecondary,
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        AppPrimaryButton(
-                            text = "Refresh",
-                            onClick = onRetry,
-                            modifier = Modifier.testTag("random_anime_refresh_button")
-                        )
-                    }
-                }
+                RandomAnimeSkeletonCard()
             }
             else -> {
                 Surface(

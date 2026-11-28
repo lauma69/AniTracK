@@ -49,9 +49,12 @@ import com.example.service.AniListMetadataProvider
 import com.example.service.AppUpdateInfo
 import com.example.service.CommunityEmojiCacheService
 import com.example.service.DiscussionRealtimeEvent
+import com.example.service.MyShuffleAnimeItem
+import com.example.service.MyShuffleService
 import com.example.service.NotificationRealtimeEvent
 import com.example.service.SupabaseDatabaseService
 import com.example.service.SupabaseDiscussionService
+import com.example.ui.components.RandomSectionCategory
 import com.example.util.DiscussionRules
 import com.example.util.ErrorSanitizer
 import com.example.worker.ScheduleUpdateWorker
@@ -179,6 +182,24 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
     private var dailyRandomFetchedIstDate: String? = null
     private var dailyRandomLoadJob: Job? = null
     private var dailyRandomMidnightWatcherJob: Job? = null
+
+    // Community — My Shuffle Personal Random Anime Generator State (zero persistent storage, zero YouTube API)
+    private val myShuffleService = MyShuffleService()
+    private val _randomSectionCategory = MutableStateFlow(RandomSectionCategory.DAILY_PICK)
+    val randomSectionCategory = _randomSectionCategory.asStateFlow()
+
+    private val _myShuffleAnime = MutableStateFlow<MyShuffleAnimeItem?>(null)
+    val myShuffleAnime = _myShuffleAnime.asStateFlow()
+
+    private val _isMyShuffleLoading = MutableStateFlow(false)
+    val isMyShuffleLoading = _isMyShuffleLoading.asStateFlow()
+
+    private val _myShuffleError = MutableStateFlow<String?>(null)
+    val myShuffleError = _myShuffleError.asStateFlow()
+
+    private val _myShuffleSequence = MutableStateFlow(0)
+    val myShuffleSequence = _myShuffleSequence.asStateFlow()
+    private var myShuffleJob: Job? = null
 
     // Community — Top Anime Catalogue State
     private val _topAnimeSource = MutableStateFlow(TopAnimeSource.ALL)
@@ -3829,7 +3850,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun restoreCachedDailyRandomForTodayIst(): DailyAnimePick? {
         val todayIst = DailyAnimeFormatters.getCurrentIstDateString()
-        val rawJson = dailyRandomPrefs.getString("daily_random_ist_v2", null) ?: return null
+        val rawJson = dailyRandomPrefs.getString("daily_random_ist_v3_entrypoint", null) ?: return null
         return runCatching {
             val wrapper = org.json.JSONObject(rawJson)
             val cachedIstDate = wrapper.optString("istDate", "")
@@ -3841,7 +3862,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                 dailyRandomFetchedIstDate = todayIst
                 pick
             } else {
-                dailyRandomPrefs.edit().remove("daily_random_ist_v2").apply()
+                dailyRandomPrefs.edit().remove("daily_random_ist_v3_entrypoint").apply()
                 null
             }
         }.getOrNull()
@@ -3868,6 +3889,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                 .put("season_year", pick.releaseYear ?: org.json.JSONObject.NULL)
                 .put("genres", org.json.JSONArray(pick.genres))
                 .put("tags", org.json.JSONArray(pick.tags))
+                .put("is_entry_point", pick.isEntryPoint)
                 .put("description", pick.description)
                 .put("duration", pick.durationMinutes ?: org.json.JSONObject.NULL)
                 .put("source", pick.rawSource ?: org.json.JSONObject.NULL)
@@ -3889,7 +3911,10 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
             val wrapper = org.json.JSONObject()
                 .put("istDate", istDate)
                 .put("row", rowObj)
-            dailyRandomPrefs.edit().putString("daily_random_ist_v2", wrapper.toString()).apply()
+            dailyRandomPrefs.edit()
+                .remove("daily_random_ist_v2")
+                .putString("daily_random_ist_v3_entrypoint", wrapper.toString())
+                .apply()
         }
     }
 
@@ -3911,6 +3936,42 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var lastDailyRandomSilentSyncMs: Long = 0L
+
+    private fun reconcileDailyRandomInBackground() {
+        val now = System.currentTimeMillis()
+        if (dailyRandomLoadJob?.isActive == true || now - lastDailyRandomSilentSyncMs < 5_000L) {
+            return
+        }
+        lastDailyRandomSilentSyncMs = now
+        dailyRandomLoadJob = viewModelScope.launch {
+            val session = _authSession.value?.let {
+                supabaseAuth.refreshSessionIfNeeded(it).getOrDefault(it)
+            }
+            supabaseDb.fetchDailyRandomAnime(session)
+                .onSuccess { pick ->
+                    val activeIstDate = DailyAnimeFormatters.getCurrentIstDateString()
+                    val candidate = when {
+                        DailyAnimeFormatters.isPickEligibleForDate(pick, activeIstDate) -> pick
+                        DailyAnimeFormatters.isPickEligibleForDate(pick) -> pick?.copy(selectionDate = activeIstDate)
+                        else -> null
+                    }
+                    if (candidate != null) {
+                        val current = _dailyRandomAnime.value
+                        if (current == null ||
+                            current.anilistId != candidate.anilistId ||
+                            current.selectionDate != candidate.selectionDate
+                        ) {
+                            _dailyRandomAnime.value = candidate
+                        }
+                        dailyRandomFetchedIstDate = activeIstDate
+                        _dailyRandomError.value = null
+                        persistDailyRandomForTodayIst(candidate, activeIstDate)
+                    }
+                }
+        }
+    }
+
     fun loadDailyRandomAnime(forceRefresh: Boolean = false) {
         val todayIst = DailyAnimeFormatters.getCurrentIstDateString()
         val currentPick = _dailyRandomAnime.value
@@ -3921,21 +3982,23 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
             dailyRandomFetchedIstDate = null
         }
 
-        // Do not reset or replace a valid recommendation already loaded for today's IST date
+        // If we already have a valid pick in memory for today's IST date, keep it visible and silently check Supabase for any SQL update
         if (_dailyRandomAnime.value != null &&
             dailyRandomFetchedIstDate == todayIst &&
             DailyAnimeFormatters.isPickEligibleForDate(_dailyRandomAnime.value, todayIst) &&
             _dailyRandomError.value == null
         ) {
+            reconcileDailyRandomInBackground()
             return
         }
 
-        // Check persistent local cache for today's IST date before making network requests
+        // Restore persistent local cache for today's IST date immediately, then silently verify with Supabase in the background
         if (!forceRefresh || _dailyRandomAnime.value == null) {
             val restored = restoreCachedDailyRandomForTodayIst()
             if (restored != null && DailyAnimeFormatters.isPickEligibleForDate(restored, todayIst)) {
                 _dailyRandomError.value = null
                 _isDailyRandomLoading.value = false
+                reconcileDailyRandomInBackground()
                 return
             }
         }
@@ -3955,6 +4018,7 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
             supabaseDb.fetchDailyRandomAnime(session)
                 .onSuccess { pick ->
                     val activeIstDate = DailyAnimeFormatters.getCurrentIstDateString()
+                    lastDailyRandomSilentSyncMs = System.currentTimeMillis()
                     if (DailyAnimeFormatters.isPickEligibleForDate(pick, activeIstDate) && pick != null) {
                         _dailyRandomAnime.value = pick
                         dailyRandomFetchedIstDate = activeIstDate
@@ -3974,6 +4038,33 @@ class AnimeViewModel(application: Application) : AndroidViewModel(application) {
                     _dailyRandomError.value = err.message ?: "Unable to load today's featured anime."
                 }
             _isDailyRandomLoading.value = false
+        }
+    }
+
+    fun setRandomSectionCategory(category: RandomSectionCategory) {
+        if (_randomSectionCategory.value == category) return
+        _randomSectionCategory.value = category
+        if (category == RandomSectionCategory.MY_SHUFFLE && _myShuffleAnime.value == null && _isMyShuffleLoading.value.not()) {
+            shuffleMyAnime()
+        }
+    }
+
+    fun shuffleMyAnime() {
+        if (myShuffleJob?.isActive == true) return
+        val currentId = _myShuffleAnime.value?.anilistId
+        myShuffleJob = viewModelScope.launch {
+            _isMyShuffleLoading.value = true
+            _myShuffleError.value = null
+            myShuffleService.nextRandomAnime(currentAnilistId = currentId)
+                .onSuccess { item ->
+                    _myShuffleAnime.value = item
+                    _myShuffleSequence.value = _myShuffleSequence.value + 1
+                    _myShuffleError.value = null
+                }
+                .onFailure { err ->
+                    _myShuffleError.value = err.message ?: "Unable to shuffle anime right now. Please try again."
+                }
+            _isMyShuffleLoading.value = false
         }
     }
 

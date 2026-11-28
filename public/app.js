@@ -851,6 +851,17 @@ const state = {
     detailsExpanded: false,
     trailerPlaying: false
   },
+  randomSectionCategory: 'daily_pick', // 'daily_pick' | 'my_shuffle'
+  myShuffle: {
+    loading: false,
+    animating: false,
+    animPhase: '', // '' | 'flip-out-left' | 'flip-out-right' | 'flip-in-left' | 'flip-in-right'
+    swipeDir: 1,
+    error: '',
+    data: null,
+    detailsExpanded: false,
+    sequence: 0
+  },
   topAnime: {
     source: 'all', // 'community' | 'all'
     limit: 10, // 10 | 25 | 50 | 100
@@ -3914,8 +3925,9 @@ async function fetchAniListSeasonBatch(ids) {
 // COMMUNITY — RANDOM ANIME OF THE DAY & TOP ANIME CATALOGUE
 // ============================================================================
 
-const DAILY_RANDOM_CACHE_KEY = 'au_daily_random_anime_v2_ist';
+const DAILY_RANDOM_CACHE_KEY = 'au_daily_random_anime_v3_ist_entrypoint';
 const LEGACY_DAILY_RANDOM_CACHE_KEY = 'au_daily_random_anime_v1';
+const LEGACY_DAILY_RANDOM_CACHE_KEY_V2 = 'au_daily_random_anime_v2_ist';
 const YOUTUBE_VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000; // UTC+05:30 (Asia/Kolkata, no DST)
 const topAnimeCatalogCache = new Map();
@@ -3958,6 +3970,69 @@ const EXCLUDED_BL_GL_EXACT_TOKENS_WEB = new Set([
 
 const EXCLUDED_BL_GL_PHRASE_RE_WEB =
   /(^|[^a-z0-9])(boys'?\s*love|boy's\s*love|girls'?\s*love|girl's\s*love|yaoi|yuri|shou?nen\s*ai|shou?jo\s*ai)([^a-z0-9]|$)/i;
+
+const SEQUEL_OR_MOVIE_TITLE_RE_WEB = new RegExp(
+  [
+    '\\bseason\\s*(?:0*[2-9]|\\d{2,}|ii|iii|iv|v|vi|vii|viii|ix|x)\\b',
+    '\\b(?:2nd|3rd|[4-9]th|\\d{2,}th|second|third|fourth|fifth|sixth|final|last|climax)\\s+(?:season|series|cour|part|chapter|arc|act)\\b',
+    '\\b(?:part|cour|act|chapter|phase|stage)\\s*(?:0*[2-9]|\\d{2,}|ii|iii|iv|v|vi)\\b',
+    '\\bs(?:0*[2-9]|\\d{2,})\\b',
+    '\\b(?:the\\s+movie|movie\\b|film\\b|ova\\b|oad\\b|recap\\b|special\\b|spin[\\s\\-]*off\\b|side[\\s\\-]*story\\b)',
+    '\\b(?:shippu?den|next\\s+generations|thousand[\\s\\-]year\\s+blood\\s+war|entertainment\\s+district\\s+arc|swordsmith\\s+village\\s+arc|hashira\\s+training\\s+arc|mugen\\s+train\\s+arc|culling\\s+game|shibuya\\s+incident)\\b',
+    '(?:\\s+|:|-)(?:ii|iii|iv|v|vi|r2)(?:\\s*$|\\s*[:\\-])'
+  ].join('|'),
+  'i'
+);
+
+function isSequelOrMovieTitleWeb(rawTitle) {
+  if (!rawTitle) return false;
+  const cleaned = String(rawTitle).trim();
+  if (!cleaned) return false;
+  return SEQUEL_OR_MOVIE_TITLE_RE_WEB.test(cleaned);
+}
+
+function fuzzyDateToSortableIntWeb(d) {
+  if (!d || typeof d !== 'object') return 0;
+  const y = Number(d.year || 0);
+  if (!y || y <= 0) return 0;
+  const m = Math.max(1, Math.min(12, Number(d.month || 1)));
+  const day = Math.max(1, Math.min(31, Number(d.day || 1)));
+  return y * 10000 + m * 100 + day;
+}
+
+function hasSequelOrDerivativeRelationWeb(media) {
+  const edges = media?.relations?.edges;
+  if (!Array.isArray(edges)) return false;
+  const candidateDate = fuzzyDateToSortableIntWeb(media?.startDate);
+  for (const edge of edges) {
+    if (!edge || typeof edge !== 'object') continue;
+    const rel = String(edge.relationType || '').trim().toUpperCase();
+    const node = edge.node;
+    const nodeType = String(node?.type || '').trim().toUpperCase();
+    const nodeFormat = String(node?.format || '').trim().toUpperCase();
+    const nodeDate = fuzzyDateToSortableIntWeb(node?.startDate);
+    if (nodeType !== 'ANIME') continue;
+
+    // Spin-offs, side stories, or sub-entries with a parent anime story
+    if (rel === 'PARENT' || rel === 'FULL_STORY') {
+      return true;
+    }
+
+    // Sequel seasons have a PREQUEL anime relation released before or alongside this season
+    if (rel === 'PREQUEL') {
+      if (nodeFormat === 'TV') {
+        if (!candidateDate || !nodeDate || nodeDate <= candidateDate) {
+          return true;
+        }
+      } else if (nodeFormat === 'TV_SHORT' || nodeFormat === 'ONA' || nodeFormat === 'MOVIE') {
+        if (candidateDate > 0 && nodeDate > 0 && nodeDate <= candidateDate) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 
 function getIstDateKey(date = new Date()) {
   const d = date instanceof Date ? date : new Date(date);
@@ -4065,6 +4140,20 @@ function isDailyAnimeRowEligibleWeb(row, expectedIstDate = null) {
     row.title || titleObj.english || titleObj.romaji || titleObj.native || ''
   ).trim();
   if (!displayTitle || displayTitle === 'Unknown') return false;
+
+  // Exclude movies, OVAs, ONAs, specials, and Season 2/3+ sequels — only standalone / Season 1 TV entry-point anime
+  const rawFormat = String(meta.format || '').trim().toUpperCase();
+  if (rawFormat !== 'TV') return false;
+  if (meta.is_entry_point === false) return false;
+  if (hasSequelOrDerivativeRelationWeb(meta)) return false;
+  if (
+    isSequelOrMovieTitleWeb(displayTitle) ||
+    isSequelOrMovieTitleWeb(titleObj.english) ||
+    isSequelOrMovieTitleWeb(titleObj.romaji) ||
+    isSequelOrMovieTitleWeb(titleObj.native)
+  ) {
+    return false;
+  }
 
   const coverImage = String(row.cover_image || meta.cover_image || '').trim();
   if (!/^https?:\/\//i.test(coverImage)) return false;
@@ -4200,6 +4289,10 @@ function normalizeDailyAnimeRow(row) {
   const meta = row.anime_metadata && typeof row.anime_metadata === 'object' ? row.anime_metadata : {};
   const ratingInt = Number(row.rating ?? meta.average_score ?? 0);
   if (!Number.isFinite(ratingInt) || ratingInt < 60 || ratingInt > 100) return null;
+  const rawFormat = String(meta.format || '').trim().toUpperCase();
+  if (rawFormat !== 'TV' || meta.is_entry_point === false || hasSequelOrDerivativeRelationWeb(meta)) {
+    return null;
+  }
   const trailerId = String(row.trailer_id || meta?.trailer?.id || '').trim();
   const studiosRaw = Array.isArray(meta.studios) ? meta.studios.filter(Boolean) : [];
   const genresRaw = extractGenreNamesWeb(meta.genres);
@@ -4215,6 +4308,15 @@ function normalizeDailyAnimeRow(row) {
       : titleObj.native && titleObj.native !== displayTitle
       ? titleObj.native
       : '';
+  if (
+    isSequelOrMovieTitleWeb(displayTitle) ||
+    isSequelOrMovieTitleWeb(secondaryTitle) ||
+    isSequelOrMovieTitleWeb(titleObj.english) ||
+    isSequelOrMovieTitleWeb(titleObj.romaji) ||
+    isSequelOrMovieTitleWeb(titleObj.native)
+  ) {
+    return null;
+  }
 
   return {
     id: row.id || '',
@@ -4233,6 +4335,8 @@ function normalizeDailyAnimeRow(row) {
     statusLabel: formatAiringStatusLabel(meta.status),
     rawStatus: String(meta.status || '').toUpperCase(),
     formatLabel: formatAnimeFormatLabel(meta.format),
+    rawFormat,
+    isEntryPoint: true,
     seasonLabel: formatAnimeSeasonLabel(meta.season),
     releaseYear: meta.season_year ? String(meta.season_year) : 'Unknown',
     durationLabel: typeof meta.duration === 'number' && meta.duration > 0 ? `${meta.duration} min` : 'Unknown',
@@ -4345,7 +4449,7 @@ async function isYouTubeTrailerEmbeddableWeb(videoId) {
 }
 
 async function pickAutomaticDailyAnimeRowWeb(todayIst, excludedIds) {
-  const prng = createDailyUtcPrng(`anime-universe-daily-ist-v2:${todayIst}`);
+  const prng = createDailyUtcPrng(`anime-universe-daily-ist-v3-entrypoint:${todayIst}`);
   const pagePool = Array.from({ length: 32 }, (_, i) => i + 1);
   for (let i = pagePool.length - 1; i >= 1; i--) {
     const j = prng.nextInt(i + 1);
@@ -4359,6 +4463,7 @@ query ($page: Int!, $perPage: Int!) {
   Page(page: $page, perPage: $perPage) {
     media(
       type: ANIME,
+      format_in: [TV],
       isAdult: false,
       averageScore_greater: 59,
       status_in: [FINISHED, RELEASING],
@@ -4386,6 +4491,17 @@ query ($page: Int!, $perPage: Int!) {
       countryOfOrigin
       studios(isMain: true) { nodes { name } }
       trailer { id site thumbnail }
+      relations {
+        edges {
+          relationType(version: 2)
+          node {
+            id
+            type
+            format
+            startDate { year month day }
+          }
+        }
+      }
     }
   }
 }
@@ -4411,9 +4527,24 @@ query ($page: Int!, $perPage: Int!) {
       const id = Number(m?.id || 0);
       const score = Number(m?.averageScore || 0);
       if (!id || excludedIds.has(id) || score < 60 || score > 100) return false;
-      const title = m?.title?.english || m?.title?.romaji || m?.title?.native || '';
+      const englishTitle = String(m?.title?.english || '').trim();
+      const romajiTitle = String(m?.title?.romaji || '').trim();
+      const nativeTitle = String(m?.title?.native || '').trim();
+      const title = englishTitle || romajiTitle || nativeTitle || '';
       const cover = m?.coverImage?.extraLarge || m?.coverImage?.large || '';
       if (!title || !cover || !/^https?:\/\//i.test(cover)) return false;
+
+      // Only standalone / Season 1 TV entry-point anime (no movies, OVAs, specials, or Season 2/3+ sequels)
+      if (String(m?.format || '').trim().toUpperCase() !== 'TV') return false;
+      if (hasSequelOrDerivativeRelationWeb(m)) return false;
+      if (
+        isSequelOrMovieTitleWeb(title) ||
+        isSequelOrMovieTitleWeb(englishTitle) ||
+        isSequelOrMovieTitleWeb(romajiTitle) ||
+        isSequelOrMovieTitleWeb(nativeTitle)
+      ) {
+        return false;
+      }
 
       // Secondary client-side genre + tag validation (reject BL/GL/Yaoi/Yuri or missing metadata)
       if (hasExcludedBlGlGenreOrTagWeb(m?.genres, m?.tags)) return false;
@@ -4476,7 +4607,8 @@ query ($page: Int!, $perPage: Int!) {
           start_date: startDateStr,
           end_date: endDateStr,
           status: m?.status || null,
-          format: m?.format || null,
+          format: m?.format || 'TV',
+          is_entry_point: true,
           season: m?.season || null,
           season_year: seasonYear,
           genres,
@@ -4532,6 +4664,63 @@ function checkDailyRandomIstRolloverOnResumeWeb() {
   }
 }
 
+let lastDailyRandomSilentSyncMsWeb = 0;
+let dailyRandomAutoRetryTimerId = null;
+
+async function reconcileDailyRandomInBackgroundWeb(todayIst) {
+  const now = Date.now();
+  if (dailyRandomInFlightPromise || now - lastDailyRandomSilentSyncMsWeb < 5000) {
+    return;
+  }
+  lastDailyRandomSilentSyncMsWeb = now;
+  try {
+    const baseUrl = getVaultBaseUrl();
+    const apiKey = getVaultPublicKey();
+    const headers = { apikey: apiKey, Accept: 'application/json' };
+    if (state.session?.accessToken) {
+      headers.Authorization = `Bearer ${state.session.accessToken}`;
+    }
+    const resp = await fetch(
+      `${baseUrl}/rest/v1/daily_anime?select=*&selection_date=eq.${encodeURIComponent(todayIst)}&limit=1`,
+      { method: 'GET', headers }
+    );
+    if (!resp.ok) return;
+    const rows = await resp.json().catch(() => []);
+    const dbRow = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+
+    if (dbRow && isDailyAnimeRowEligibleWeb(dbRow, todayIst)) {
+      const normalized = normalizeDailyAnimeRow(dbRow);
+      if (normalized) {
+        const dr = state.dailyRandom;
+        const changed =
+          !dr.data ||
+          dr.data.anilistId !== normalized.anilistId ||
+          dr.data.selectionDate !== normalized.selectionDate;
+        dr.data = normalized;
+        dr.fetchedDate = todayIst;
+        dr.error = '';
+        try {
+          localStorage.setItem(
+            DAILY_RANDOM_CACHE_KEY,
+            JSON.stringify({ istDate: todayIst, cachedDate: todayIst, row: dbRow })
+          );
+        } catch (_) {}
+        if (changed && state.tab === 'community' && state.communityViewTab === 'random') {
+          renderApp();
+        }
+      }
+    } else if (Array.isArray(rows) && rows.length === 0 && state.session?.accessToken) {
+      // Today's row was cleared in Supabase via SQL; clear local cache and seamlessly re-initialize
+      try {
+        localStorage.removeItem(DAILY_RANDOM_CACHE_KEY);
+      } catch (_) {}
+      state.dailyRandom.data = null;
+      state.dailyRandom.fetchedDate = '';
+      loadDailyRandomAnime(true);
+    }
+  } catch (_) {}
+}
+
 async function loadDailyRandomAnime(forceRefresh = false) {
   scheduleNextIstMidnightResetWeb();
   const todayIst = getIstDateKey();
@@ -4544,19 +4733,24 @@ async function loadDailyRandomAnime(forceRefresh = false) {
       dr.data.selectionDate !== todayIst ||
       !dr.data.rating100 ||
       dr.data.rating100 < 60 ||
+      dr.data.rawFormat !== 'TV' ||
+      dr.data.isEntryPoint === false ||
+      isSequelOrMovieTitleWeb(dr.data.title) ||
+      isSequelOrMovieTitleWeb(dr.data.secondaryTitle) ||
       hasExcludedBlGlGenreOrTagWeb(dr.data.genres, dr.data.tags))
   ) {
     dr.data = null;
     dr.fetchedDate = '';
   }
 
-  // Never reset a valid daily recommendation on the same IST date when the app is refreshed or reopened
+  // Keep valid daily recommendation on the same IST date and silently verify with Supabase in the background
   if (
     dr.data &&
     dr.fetchedDate === todayIst &&
     dr.data.selectionDate === todayIst &&
     !dr.error
   ) {
+    reconcileDailyRandomInBackgroundWeb(todayIst);
     return dr.data;
   }
 
@@ -4564,6 +4758,7 @@ async function loadDailyRandomAnime(forceRefresh = false) {
   if (!forceRefresh || !dr.data) {
     try {
       localStorage.removeItem(LEGACY_DAILY_RANDOM_CACHE_KEY);
+      localStorage.removeItem(LEGACY_DAILY_RANDOM_CACHE_KEY_V2);
       const cachedRaw = localStorage.getItem(DAILY_RANDOM_CACHE_KEY);
       if (cachedRaw) {
         const cached = JSON.parse(cachedRaw);
@@ -4582,6 +4777,7 @@ async function loadDailyRandomAnime(forceRefresh = false) {
             if (state.tab === 'community' && state.communityViewTab === 'random') {
               renderApp();
             }
+            reconcileDailyRandomInBackgroundWeb(todayIst);
             return normalized;
           }
         }
@@ -5095,12 +5291,770 @@ async function loadTopAnimeCatalog(forceRefresh = false) {
   }
 }
 
+// ============================================================================
+// COMMUNITY — MY SHUFFLE (Personal Random Anime Generator • Zero Storage • Zero YouTube API)
+// ============================================================================
+
+const myShuffleBatchPoolWeb = [];
+let myShuffleInFlightPromiseWeb = null;
+let lastRandomCategorySlideFrom = null;
+const MY_SHUFFLE_SORT_MODES_WEB = [
+  'POPULARITY_DESC',
+  'SCORE_DESC',
+  'FAVOURITES_DESC',
+  'TRENDING_DESC'
+];
+
+function isReducedMotionPreferredWeb() {
+  try {
+    return Boolean(
+      typeof window !== 'undefined' &&
+        window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function cryptoRandomIntWeb(min, max) {
+  if (max <= min) return min;
+  try {
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      const buf = new Uint32Array(1);
+      crypto.getRandomValues(buf);
+      return min + (buf[0] % (max - min + 1));
+    }
+  } catch (_) {}
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function shuffleArrayInMemoryWeb(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = cryptoRandomIntWeb(0, i);
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
+}
+
+function parseAndValidateMyShuffleCandidateWeb(m) {
+  if (!m || typeof m !== 'object') return null;
+  const id = Number(m.id || 0);
+  const score = Number(m.averageScore || 0);
+  if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(score) || score < 60 || score > 100) {
+    return null;
+  }
+
+  const english = String(m?.title?.english || '').trim();
+  const romaji = String(m?.title?.romaji || '').trim();
+  const nativeTitle = String(m?.title?.native || '').trim();
+  const displayTitle = english || romaji || nativeTitle;
+  if (!displayTitle) return null;
+
+  const secondaryTitle =
+    romaji && romaji !== displayTitle
+      ? romaji
+      : nativeTitle && nativeTitle !== displayTitle
+      ? nativeTitle
+      : '';
+
+  const coverImage = String(m?.coverImage?.extraLarge || m?.coverImage?.large || '').trim();
+  if (!/^https?:\/\//i.test(coverImage)) return null;
+
+  const genres = extractGenreNamesWeb(m.genres);
+  const tags = extractTagNamesWeb(m.tags);
+  // Strict BL/GL/Yaoi/Yuri exclusion & conservative missing genre/tag check (ordinary Romance passes)
+  if (hasExcludedBlGlGenreOrTagWeb(genres, tags)) {
+    return null;
+  }
+
+  const studios = Array.isArray(m?.studios?.nodes)
+    ? m.studios.nodes.map((s) => String(s?.name || '').trim()).filter(Boolean)
+    : [];
+  const startDateIso = formatFuzzyDateNode(m.startDate);
+  const endDateIso = formatFuzzyDateNode(m.endDate);
+  const seasonYear = m.seasonYear || m?.startDate?.year || null;
+  const startDateFormatted = formatIsoDateReadable(startDateIso);
+  const releaseYearStr = seasonYear
+    ? String(seasonYear)
+    : startDateIso && startDateIso.length >= 4
+    ? startDateIso.slice(0, 4)
+    : 'Unknown';
+
+  return {
+    anilistId: id,
+    title: displayTitle,
+    secondaryTitle,
+    rating100: score,
+    rating10: (score / 10).toFixed(1),
+    coverImage,
+    bannerImage: String(m.bannerImage || '').trim(),
+    episodes: typeof m.episodes === 'number' && m.episodes > 0 ? m.episodes : null,
+    episodesLabel:
+      typeof m.episodes === 'number' && m.episodes > 0 ? `${m.episodes} eps` : 'Unknown eps',
+    startDate: startDateFormatted,
+    endDate: formatIsoDateReadable(endDateIso),
+    releaseYear: releaseYearStr,
+    releaseDateOrYear: startDateFormatted !== 'Unknown' ? startDateFormatted : releaseYearStr,
+    statusLabel: formatAiringStatusLabel(m.status),
+    rawStatus: String(m.status || '').toUpperCase(),
+    formatLabel: formatAnimeFormatLabel(m.format),
+    rawFormat: String(m.format || '').toUpperCase(),
+    seasonLabel: formatAnimeSeasonLabel(m.season),
+    durationLabel: typeof m.duration === 'number' && m.duration > 0 ? `${m.duration} min` : 'Unknown',
+    sourceLabel: formatAnimeSourceLabel(m.source),
+    studiosLabel: studios.length > 0 ? studios.join(', ') : 'Unknown',
+    countryLabel: m.countryOfOrigin ? String(m.countryOfOrigin) : 'Unknown',
+    genres,
+    description: stripAnimeHtml(m.description || '')
+  };
+}
+
+async function fetchMyShuffleAniListBatchWeb(page, perPage, sortMode) {
+  const query = `
+query ($page: Int!, $perPage: Int!, $sort: [MediaSort]) {
+  Page(page: $page, perPage: $perPage) {
+    media(
+      type: ANIME,
+      isAdult: false,
+      averageScore_greater: 59,
+      status_in: [FINISHED, RELEASING],
+      genre_not_in: ["Hentai", "Boys' Love", "Girls' Love", "Yaoi", "Yuri", "Shounen Ai", "Shoujo Ai"],
+      tag_not_in: ["Boys' Love", "Girls' Love", "Yuri", "Yaoi", "Shounen Ai", "Shoujo Ai"],
+      sort: $sort
+    ) {
+      id
+      title { english romaji native }
+      coverImage { extraLarge large }
+      bannerImage
+      averageScore
+      episodes
+      startDate { year month day }
+      endDate { year month day }
+      status
+      format
+      season
+      seasonYear
+      genres
+      tags { name category }
+      description(asHtml: false)
+      duration
+      source
+      countryOfOrigin
+      studios(isMain: true) { nodes { name } }
+    }
+  }
+}
+`;
+
+  const resp = await fetch('https://graphql.anilist.co', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      query,
+      variables: { page, perPage, sort: [sortMode, 'ID'] }
+    })
+  });
+  if (!resp.ok) {
+    throw new Error(`AniList request failed with HTTP ${resp.status}`);
+  }
+  const json = await resp.json();
+  const rawList = Array.isArray(json?.data?.Page?.media) ? json.data.Page.media : [];
+  const validItems = [];
+  for (const m of rawList) {
+    const parsed = parseAndValidateMyShuffleCandidateWeb(m);
+    if (parsed) validItems.push(parsed);
+  }
+  return validItems;
+}
+
+function drawFromMyShufflePoolWeb(currentAnilistId) {
+  if (myShuffleBatchPoolWeb.length === 0) return null;
+  if (
+    myShuffleBatchPoolWeb.length === 1 &&
+    currentAnilistId &&
+    myShuffleBatchPoolWeb[0].anilistId === currentAnilistId
+  ) {
+    myShuffleBatchPoolWeb.length = 0;
+    return null;
+  }
+  const first = myShuffleBatchPoolWeb.shift();
+  if (currentAnilistId && first.anilistId === currentAnilistId && myShuffleBatchPoolWeb.length > 0) {
+    const second = myShuffleBatchPoolWeb.shift();
+    myShuffleBatchPoolWeb.push(first);
+    return second;
+  }
+  return first;
+}
+
+async function generateNextMyShuffleAnimeWeb() {
+  const currentId = state.myShuffle.data?.anilistId || null;
+  const buffered = drawFromMyShufflePoolWeb(currentId);
+  if (buffered) return buffered;
+
+  let lastErr = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const sortMode =
+      MY_SHUFFLE_SORT_MODES_WEB[cryptoRandomIntWeb(0, MY_SHUFFLE_SORT_MODES_WEB.length - 1)];
+    const maxPage = attempt < 2 ? 28 : 12;
+    const randomPage = cryptoRandomIntWeb(1, maxPage);
+    try {
+      const batch = await fetchMyShuffleAniListBatchWeb(randomPage, 50, sortMode);
+      if (batch.length > 0) {
+        shuffleArrayInMemoryWeb(batch);
+        myShuffleBatchPoolWeb.length = 0;
+        myShuffleBatchPoolWeb.push(...batch);
+        const picked = drawFromMyShufflePoolWeb(currentId);
+        if (picked) return picked;
+      }
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Unable to shuffle anime from AniList right now. Please try again.');
+}
+
+function renderTactileDiceSvgWeb(face = 5, size = 22, className = 'my-shuffle-die-svg') {
+  const safeFace = Math.max(1, Math.min(6, Number(face) || 5));
+  const coordsByFace = {
+    1: [[12, 12]],
+    2: [
+      [7.2, 7.2],
+      [16.8, 16.8]
+    ],
+    3: [
+      [7.2, 7.2],
+      [12, 12],
+      [16.8, 16.8]
+    ],
+    4: [
+      [7.2, 7.2],
+      [16.8, 7.2],
+      [7.2, 16.8],
+      [16.8, 16.8]
+    ],
+    5: [
+      [7.2, 7.2],
+      [16.8, 7.2],
+      [12, 12],
+      [7.2, 16.8],
+      [16.8, 16.8]
+    ],
+    6: [
+      [7.2, 6.8],
+      [16.8, 6.8],
+      [7.2, 12],
+      [16.8, 12],
+      [7.2, 17.2],
+      [16.8, 17.2]
+    ]
+  };
+  const pips = (coordsByFace[safeFace] || coordsByFace[5])
+    .map(([cx, cy]) => `<circle cx="${cx}" cy="${cy}" r="1.85" fill="currentColor" />`)
+    .join('');
+  return `<svg class="${className}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <rect x="2.25" y="2.25" width="19.5" height="19.5" rx="5.5" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="1.9" />
+    ${pips}
+  </svg>`;
+}
+
+let myShuffleDustMotesPoolWeb = null;
+
+function getMyShuffleDustMotesPoolWeb() {
+  if (myShuffleDustMotesPoolWeb) return myShuffleDustMotesPoolWeb;
+  const motes = [];
+  for (let i = 0; i < 145; i++) {
+    const nx = Math.random();
+    const ny = Math.random();
+    // Diagonal disintegration wave from bottom-left to top-right
+    const delayWave = Math.min(0.44, Math.max(0, (nx * 0.65 + (1 - ny) * 0.35) * 0.44));
+    motes.push({
+      normX: nx,
+      normY: ny,
+      driftDx: 32 + Math.random() * 84,
+      driftDy: -(24 + Math.random() * 76),
+      radius: 1.5 + Math.random() * 3.8,
+      delayWave,
+      swirlFreq: 2.2 + Math.random() * 4.2,
+      swirlAmp: 6 + Math.random() * 18,
+      colorType: i % 4,
+      peakAlpha: 0.58 + Math.random() * 0.42
+    });
+  }
+  myShuffleDustMotesPoolWeb = motes;
+  return motes;
+}
+
+function runMyShuffleDustCanvasAnimationWeb(mode = 'dissolve', durationMs = 330) {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return Promise.resolve();
+  const canvas = document.getElementById('my-shuffle-dust-canvas');
+  const stage = document.getElementById('my-shuffle-card-stage');
+  if (!canvas || !stage) {
+    return new Promise((r) => setTimeout(r, durationMs));
+  }
+
+  const rect = stage.getBoundingClientRect();
+  const pad = 20;
+  const cssW = Math.max(240, rect.width + pad * 2);
+  const cssH = Math.max(260, rect.height + pad * 2);
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return new Promise((r) => setTimeout(r, durationMs));
+  }
+
+  const styles = window.getComputedStyle(document.documentElement);
+  const accentColor = styles.getPropertyValue('--accent-primary').trim() || '#D97757';
+  const highlightColor = styles.getPropertyValue('--highlight').trim() || '#F4B084';
+  const primaryText = styles.getPropertyValue('--text-primary').trim() || '#F5F2EB';
+  const secondaryText = styles.getPropertyValue('--text-secondary').trim() || '#A6ADBF';
+  const palette = [highlightColor, accentColor, primaryText, secondaryText];
+  const motes = getMyShuffleDustMotesPoolWeb();
+  const startTime = performance.now();
+
+  return new Promise((resolve) => {
+    function step(now) {
+      const elapsed = now - startTime;
+      const prog = Math.min(1, Math.max(0, elapsed / durationMs));
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssW, cssH);
+
+      const cardW = cssW - pad * 2;
+      const cardH = cssH - pad * 2;
+
+      for (let i = 0; i < motes.length; i++) {
+        const m = motes[i];
+        const denom = Math.max(0.25, 1 - m.delayWave);
+        const localT = Math.min(1, Math.max(0, (prog - m.delayWave) / denom));
+        if (localT <= 0 || localT >= 1) continue;
+
+        // mode === 'dissolve': particles break off card and billow outward into dust
+        // mode === 'materialize': particles swirl inward from dust cloud to form new card
+        const dispT = mode === 'dissolve' ? localT : 1 - localT;
+        const angle = dispT * m.swirlFreq * Math.PI;
+        const swirlX = Math.sin(angle) * m.swirlAmp;
+        const swirlY = Math.cos(angle) * (m.swirlAmp * 0.45);
+
+        const px = pad + m.normX * cardW + m.driftDx * dispT + swirlX;
+        const py = pad + m.normY * cardH + m.driftDy * dispT + swirlY;
+        const env = Math.sin(localT * Math.PI);
+        const alpha = Math.min(1, Math.max(0, env * m.peakAlpha));
+        const r = m.radius * (0.65 + 0.55 * env);
+        const col = palette[m.colorType];
+
+        ctx.save();
+        ctx.fillStyle = col;
+        ctx.globalAlpha = alpha * 0.28;
+        ctx.beginPath();
+        ctx.arc(px, py, r * 2.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      if (prog < 1) {
+        requestAnimationFrame(step);
+      } else {
+        ctx.clearRect(0, 0, cssW, cssH);
+        resolve();
+      }
+    }
+    requestAnimationFrame(step);
+  });
+}
+
+async function triggerMyShuffleAgainWeb() {
+  const ms = state.myShuffle;
+  if (ms.loading || ms.animating || myShuffleInFlightPromiseWeb) return;
+
+  const reducedMotion = isReducedMotionPreferredWeb();
+  ms.diceFace = ms.diceFace || 5;
+
+  // Phase 1: Old Card Template Disintegrates Into Swirling Dust (~320ms)
+  let diceFaceTimer = null;
+  if (ms.data && !reducedMotion) {
+    ms.animating = true;
+    ms.animPhase = 'dust-dissolve';
+    const rollSequence = [3, 6, 1, 4, 2, 5];
+    let stepIdx = 0;
+    ms.diceFace = rollSequence[0];
+    if (state.tab === 'community' && state.communityViewTab === 'random') {
+      renderApp();
+    }
+    diceFaceTimer = setInterval(() => {
+      stepIdx = (stepIdx + 1) % rollSequence.length;
+      ms.diceFace = rollSequence[stepIdx];
+      const liveBtnDie = document.getElementById('my-shuffle-live-btn-die');
+      if (liveBtnDie) {
+        liveBtnDie.innerHTML = renderTactileDiceSvgWeb(ms.diceFace, 22, 'my-shuffle-die-svg');
+      }
+    }, 48);
+    await runMyShuffleDustCanvasAnimationWeb('dissolve', 320);
+    if (diceFaceTimer) {
+      clearInterval(diceFaceTimer);
+      diceFaceTimer = null;
+    }
+  }
+
+  ms.diceFace = cryptoRandomIntWeb(1, 6);
+  ms.loading = true;
+  ms.error = '';
+  ms.detailsExpanded = false;
+  if (!ms.data && state.tab === 'community' && state.communityViewTab === 'random') {
+    renderApp();
+  }
+
+  myShuffleInFlightPromiseWeb = (async () => {
+    try {
+      const nextItem = await generateNextMyShuffleAnimeWeb();
+      ms.data = nextItem;
+      ms.sequence = (ms.sequence || 0) + 1;
+      ms.error = '';
+      ms.loading = false;
+
+      // Phase 2: New Card Template Materializes Out of the Swirling Dust (~380ms)
+      if (!reducedMotion) {
+        ms.animating = true;
+        ms.animPhase = 'dust-materialize';
+        if (state.tab === 'community' && state.communityViewTab === 'random') {
+          renderApp();
+        }
+        await runMyShuffleDustCanvasAnimationWeb('materialize', 380);
+      }
+    } catch (err) {
+      ms.error = err?.message || 'Unable to shuffle anime right now. Please try again.';
+    } finally {
+      if (diceFaceTimer) clearInterval(diceFaceTimer);
+      ms.loading = false;
+      ms.animating = false;
+      ms.animPhase = '';
+      myShuffleInFlightPromiseWeb = null;
+      if (state.tab === 'community' && state.communityViewTab === 'random') {
+        renderApp();
+      }
+    }
+  })();
+
+  return myShuffleInFlightPromiseWeb;
+}
+
+function switchRandomSectionCategoryWeb(rawCat) {
+  const nextCat = rawCat === 'my_shuffle' ? 'my_shuffle' : 'daily_pick';
+  if (state.randomSectionCategory === nextCat) return;
+  lastRandomCategorySlideFrom = state.randomSectionCategory;
+  state.randomSectionCategory = nextCat;
+  renderApp();
+  if (nextCat === 'my_shuffle' && !state.myShuffle.data && !state.myShuffle.loading) {
+    triggerMyShuffleAgainWeb();
+  } else if (nextCat === 'daily_pick' && !state.dailyRandom.data && !state.dailyRandom.loading) {
+    loadDailyRandomAnime(false);
+  }
+}
+
+function renderRandomSectionCategoryBarWeb() {
+  const cat = state.randomSectionCategory === 'my_shuffle' ? 'my_shuffle' : 'daily_pick';
+  const isDaily = cat === 'daily_pick';
+  return `
+    <div class="random-category-bar-card" aria-label="Random Section Categories">
+      <div class="random-category-bar-top">
+        <div class="random-category-meta">
+          <span class="random-category-kicker">${
+            isDaily ? '★ DAILY GLOBAL FEATURE' : '⚄ PERSONAL DISCOVERY DECK'
+          }</span>
+          <span class="random-category-sub">${
+            isDaily
+              ? 'Global recommendation • Resets 12:00 AM IST'
+              : 'Personal anime discovery • Roll the dice anytime'
+          }</span>
+        </div>
+      </div>
+      <div class="random-category-toggle" id="random-category-toggle" role="tablist" aria-label="Random Discovery Mode" data-active-cat="${cat}">
+        <span class="random-category-slider ${isDaily ? 'is-daily' : 'is-shuffle'}" id="random-category-slider" aria-hidden="true"></span>
+        <button type="button" role="tab" aria-selected="${isDaily ? 'true' : 'false'}" class="random-category-btn ${isDaily ? 'active' : ''}" data-random-cat="daily_pick">
+          <span>★</span>
+          <span>Daily Pick</span>
+        </button>
+        <button type="button" role="tab" aria-selected="${!isDaily ? 'true' : 'false'}" class="random-category-btn ${!isDaily ? 'active' : ''}" data-random-cat="my_shuffle">
+          <span>⚄</span>
+          <span>My Shuffle</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderMyShuffleSectionWeb() {
+  const ms = state.myShuffle;
+  const item = ms.data;
+  const isBusy = Boolean(ms.loading || ms.animating);
+  const currentDiceFace = ms.diceFace || 5;
+
+  if (!item && !ms.loading && !ms.error && typeof window !== 'undefined') {
+    setTimeout(() => {
+      if (
+        state.randomSectionCategory === 'my_shuffle' &&
+        !state.myShuffle.data &&
+        !state.myShuffle.loading
+      ) {
+        triggerMyShuffleAgainWeb();
+      }
+    }, 30);
+  }
+
+  if (!item && ms.loading) {
+    return `
+      <div class="daily-random-card my-shuffle-card my-shuffle-transition-state" aria-live="polite">
+        <div class="my-shuffle-shuffling-pill">
+          <span class="my-shuffle-inline-rolling-die" aria-hidden="true">${renderTactileDiceSvgWeb(currentDiceFace, 18)}</span>
+          <span>ROLLING FOR YOUR NEXT ANIME…</span>
+        </div>
+        <div class="daily-random-main">
+          <div class="skeleton-poster"></div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:10px;">
+            <div class="skeleton-line" style="width:78%;height:24px;"></div>
+            <div class="skeleton-line" style="width:45%;height:16px;"></div>
+            <div class="skeleton-line" style="width:100%;height:14px;"></div>
+            <div class="skeleton-line" style="width:92%;height:14px;"></div>
+            <div class="skeleton-line" style="width:66%;height:14px;"></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (!item && ms.error) {
+    return `
+      <div class="daily-random-card my-shuffle-card" style="text-align:center;padding:32px 22px;">
+        <div style="display:inline-flex;padding:12px;border-radius:18px;background:var(--accent-soft);color:var(--highlight);margin-bottom:12px;">
+          ${renderTactileDiceSvgWeb(currentDiceFace, 36)}
+        </div>
+        <div class="serif-heading" style="font-size:24px;margin-bottom:8px;">Shuffle Deck Unavailable</div>
+        <p style="color:var(--text-secondary);font-size:13.5px;margin-bottom:16px;">${escapeHtml(ms.error)}</p>
+        <button type="button" class="my-shuffle-primary-btn" id="btn-my-shuffle-again" style="max-width:260px;margin:0 auto;">
+          <span class="my-shuffle-dice-icon-wrap">${renderTactileDiceSvgWeb(currentDiceFace, 20)}</span>
+          <span>SHUFFLE ANIME</span>
+        </button>
+      </div>
+    `;
+  }
+
+  if (!item) {
+    return '';
+  }
+
+  const shortDesc =
+    item.description.length > 280 && !ms.detailsExpanded
+      ? `${item.description.slice(0, 280).trim()}…`
+      : item.description || 'No description available.';
+
+  const animClass = ms.animPhase ? `is-${ms.animPhase}` : '';
+  const bannerUrl = item.bannerImage || item.coverImage || '';
+  const firstStudio =
+    item.studiosLabel && item.studiosLabel !== 'Unknown'
+      ? item.studiosLabel.split(',')[0].trim()
+      : '';
+
+  return `
+    <div class="my-shuffle-deck-wrapper">
+      <div class="my-shuffle-deck-backplate" aria-hidden="true"></div>
+      <section
+        class="daily-random-card my-shuffle-card ${animClass}"
+        id="my-shuffle-card-stage"
+        aria-label="My Shuffle Personal Random Anime"
+      >
+        ${
+          bannerUrl
+            ? `<div class="daily-random-banner my-shuffle-hero-banner" style="background-image:url('${escapeHtml(bannerUrl)}');"></div>`
+            : ''
+        }
+        <div class="daily-random-inner my-shuffle-card-inner">
+          <div class="my-shuffle-top-row">
+            <div class="my-shuffle-badge-cluster">
+              <span class="daily-pick-badge">✦ MY SHUFFLE</span>
+              <span class="daily-meta-pill status-${escapeHtml(item.rawStatus.toLowerCase() || 'unknown')}">${escapeHtml(item.statusLabel)}</span>
+            </div>
+            ${
+              item.anilistId
+                ? `<button type="button" class="capsule-pill active my-shuffle-open-btn" data-comm-open-anime="${item.anilistId}">
+                    <span>Open Page</span>
+                    <span aria-hidden="true">↗</span>
+                  </button>`
+                : ''
+            }
+          </div>
+
+          <div class="my-shuffle-showcase-row my-shuffle-stagger-body">
+            <div class="my-shuffle-poster-frame" ${item.anilistId ? `data-comm-open-anime="${item.anilistId}" style="cursor:pointer;"` : ''}>
+              ${
+                item.coverImage
+                  ? `<img class="daily-random-poster my-shuffle-poster" src="${escapeHtml(item.coverImage)}" alt="${escapeHtml(item.title)}" loading="lazy" draggable="false" />`
+                  : `<div class="daily-random-poster daily-random-poster-fallback">✦</div>`
+              }
+              <span class="my-shuffle-poster-format-tag">${escapeHtml(item.formatLabel)}</span>
+            </div>
+
+            <div class="daily-random-info my-shuffle-info-animate">
+              <h3 class="daily-random-title my-shuffle-anime-title">${escapeHtml(item.title)}</h3>
+              ${
+                item.secondaryTitle
+                  ? `<div class="daily-random-subtitle">${escapeHtml(item.secondaryTitle)}</div>`
+                  : ''
+              }
+
+              <div class="my-shuffle-highlight-pills">
+                <span class="daily-rating-pill">★ ${escapeHtml(`${item.rating10} / 10`)}</span>
+                ${
+                  firstStudio
+                    ? `<span class="daily-meta-pill">${escapeHtml(firstStudio)}</span>`
+                    : ''
+                }
+              </div>
+
+              ${
+                item.genres.length > 0
+                  ? `<div class="daily-genre-row">
+                      ${item.genres.slice(0, 5).map((g) => `<span class="daily-genre-chip">${escapeHtml(g)}</span>`).join('')}
+                    </div>`
+                  : ''
+              }
+            </div>
+          </div>
+
+          <div class="my-shuffle-specs-strip my-shuffle-info-animate">
+            <div class="my-shuffle-spec-cell">
+              <span class="my-shuffle-spec-label">SCORE</span>
+              <span class="my-shuffle-spec-val is-accent">★ ${escapeHtml(item.rating10)}</span>
+            </div>
+            <div class="my-shuffle-spec-divider" aria-hidden="true"></div>
+            <div class="my-shuffle-spec-cell">
+              <span class="my-shuffle-spec-label">FORMAT</span>
+              <span class="my-shuffle-spec-val">${escapeHtml(item.formatLabel)}</span>
+            </div>
+            <div class="my-shuffle-spec-divider" aria-hidden="true"></div>
+            <div class="my-shuffle-spec-cell">
+              <span class="my-shuffle-spec-label">EPISODES</span>
+              <span class="my-shuffle-spec-val">${escapeHtml(item.episodes != null ? String(item.episodes) : 'TBA')}</span>
+            </div>
+            <div class="my-shuffle-spec-divider" aria-hidden="true"></div>
+            <div class="my-shuffle-spec-cell">
+              <span class="my-shuffle-spec-label">YEAR</span>
+              <span class="my-shuffle-spec-val">${escapeHtml(item.releaseYear)}</span>
+            </div>
+          </div>
+
+          <div class="my-shuffle-synopsis-box my-shuffle-info-animate">
+            <div class="my-shuffle-synopsis-label">SYNOPSIS</div>
+            <p class="daily-random-description my-shuffle-synopsis-text">${escapeHtml(shortDesc)}</p>
+          </div>
+
+          <div class="my-shuffle-subactions-row">
+            <button type="button" class="daily-details-toggle" id="btn-my-shuffle-toggle-details" aria-expanded="${ms.detailsExpanded ? 'true' : 'false'}">
+              <span>${ms.detailsExpanded ? 'Hide Details' : 'View Details'}</span>
+              <span class="daily-chevron ${ms.detailsExpanded ? 'open' : ''}">▾</span>
+            </button>
+            <span class="daily-date-chip">Released: ${escapeHtml(item.releaseDateOrYear)}</span>
+          </div>
+
+          ${
+            ms.detailsExpanded
+              ? `
+                <div class="daily-details-grid">
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Total Episodes</span>
+                    <span class="daily-detail-value">${escapeHtml(item.episodes != null ? String(item.episodes) : 'Unknown')}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Format</span>
+                    <span class="daily-detail-value">${escapeHtml(item.formatLabel)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Airing Status</span>
+                    <span class="daily-detail-value">${escapeHtml(item.statusLabel)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Release Date</span>
+                    <span class="daily-detail-value">${escapeHtml(item.releaseDateOrYear)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Season</span>
+                    <span class="daily-detail-value">${escapeHtml(item.seasonLabel)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Release Year</span>
+                    <span class="daily-detail-value">${escapeHtml(item.releaseYear)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Episode Duration</span>
+                    <span class="daily-detail-value">${escapeHtml(item.durationLabel)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Source Material</span>
+                    <span class="daily-detail-value">${escapeHtml(item.sourceLabel)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Animation Studio</span>
+                    <span class="daily-detail-value">${escapeHtml(item.studiosLabel)}</span>
+                  </div>
+                  <div class="daily-detail-cell">
+                    <span class="daily-detail-label">Country</span>
+                    <span class="daily-detail-value">${escapeHtml(item.countryLabel)}</span>
+                  </div>
+                </div>
+              `
+              : ''
+          }
+
+          <div class="my-shuffle-controls-bar">
+            <button
+              type="button"
+              class="my-shuffle-primary-btn ${isBusy ? 'is-loading' : ''}"
+              id="btn-my-shuffle-again"
+              ${isBusy ? 'disabled' : ''}
+            >
+              <span class="my-shuffle-dice-icon-wrap ${isBusy ? 'is-rolling' : ''}" id="my-shuffle-live-btn-die" aria-hidden="true">
+                ${renderTactileDiceSvgWeb(currentDiceFace, 22, 'my-shuffle-die-svg')}
+              </span>
+              <span>${isBusy ? 'SHUFFLING…' : 'SHUFFLE ANIME'}</span>
+            </button>
+          </div>
+        </div>
+      </section>
+      <canvas class="my-shuffle-dust-canvas" id="my-shuffle-dust-canvas" aria-hidden="true"></canvas>
+    </div>
+  `;
+}
+
 function renderRandomAnimeSection() {
+  const categoryBar = renderRandomSectionCategoryBarWeb();
+  if (state.randomSectionCategory === 'my_shuffle') {
+    return `${categoryBar}${renderMyShuffleSectionWeb()}`;
+  }
+
   const dr = state.dailyRandom;
   const pick = dr.data;
 
-  if (dr.loading && !pick) {
+  if (!pick) {
+    if (!dr.loading && typeof window !== 'undefined' && !dailyRandomAutoRetryTimerId) {
+      const delayMs = dr.error ? 2500 : 80;
+      dailyRandomAutoRetryTimerId = setTimeout(() => {
+        dailyRandomAutoRetryTimerId = null;
+        if (!state.dailyRandom.data && !state.dailyRandom.loading) {
+          loadDailyRandomAnime(false);
+        }
+      }, delayMs);
+    }
     return `
+      ${categoryBar}
       <div class="daily-random-card daily-random-skeleton">
         <div class="daily-random-header">
           <div>
@@ -5123,29 +6077,6 @@ function renderRandomAnimeSection() {
     `;
   }
 
-  if (dr.error && !pick) {
-    return `
-      <div class="app-card" style="text-align:center;padding:38px 22px;">
-        <div class="serif-heading" style="font-size:24px;margin-bottom:8px;">Random Anime of the Day</div>
-        <p style="color:var(--text-secondary);font-size:13.5px;margin-bottom:16px;">${escapeHtml(dr.error)}</p>
-        <button type="button" class="btn-primary" id="btn-random-retry">TRY AGAIN</button>
-      </div>
-    `;
-  }
-
-  if (!pick) {
-    return `
-      <div class="app-card" style="text-align:center;padding:40px 22px;">
-        <span class="daily-pick-badge">TODAY’S PICK</span>
-        <div class="serif-heading" style="font-size:26px;margin:10px 0 8px;">Random Anime of the Day</div>
-        <p style="color:var(--text-secondary);font-size:13.5px;max-width:420px;margin:0 auto 16px;">
-          Today’s featured anime selection is being prepared. Check back shortly!
-        </p>
-        <button type="button" class="btn-secondary" id="btn-random-retry">REFRESH</button>
-      </div>
-    `;
-  }
-
   const shortDesc =
     pick.description.length > 260 && !dr.detailsExpanded
       ? `${pick.description.slice(0, 260).trim()}…`
@@ -5162,6 +6093,7 @@ function renderRandomAnimeSection() {
     : '';
 
   return `
+    ${categoryBar}
     <section class="daily-random-card" aria-label="Random Anime of the Day">
       ${
         pick.bannerImage
@@ -14055,7 +14987,7 @@ function bindAppEvents() {
         ignoreSwipe = Boolean(
           target &&
             target.closest &&
-            target.closest('.capsule-strip, .top-pill-row, .top-source-toggle, .community-view-switcher, iframe, input, textarea')
+            target.closest('.capsule-strip, .top-pill-row, .top-source-toggle, .random-category-toggle, .my-shuffle-card, .my-shuffle-deck-wrapper, .community-view-switcher, iframe, input, textarea')
         );
         touchStartX = e.touches[0].clientX;
         touchStartY = e.touches[0].clientY;
@@ -14104,6 +15036,43 @@ function bindAppEvents() {
   const btnRandomRetry = document.getElementById('btn-random-retry');
   if (btnRandomRetry) {
     btnRandomRetry.onclick = () => loadDailyRandomAnime(true);
+  }
+
+  // Random Section: Daily Pick | My Shuffle Category Toggle & Interactive Swipe/Flip
+  const randomCatToggle = document.getElementById('random-category-toggle');
+  const randomCatSlider = document.getElementById('random-category-slider');
+  if (randomCatToggle && randomCatSlider) {
+    const activeCat = state.randomSectionCategory === 'my_shuffle' ? 'my_shuffle' : 'daily_pick';
+    if (lastRandomCategorySlideFrom && lastRandomCategorySlideFrom !== activeCat) {
+      randomCatSlider.style.transition = 'none';
+      randomCatSlider.classList.toggle('is-daily', lastRandomCategorySlideFrom === 'daily_pick');
+      randomCatSlider.classList.toggle('is-shuffle', lastRandomCategorySlideFrom === 'my_shuffle');
+      void randomCatSlider.offsetWidth;
+      randomCatSlider.style.transition = '';
+      requestAnimationFrame(() => {
+        randomCatSlider.classList.toggle('is-daily', activeCat === 'daily_pick');
+        randomCatSlider.classList.toggle('is-shuffle', activeCat === 'my_shuffle');
+      });
+    }
+    lastRandomCategorySlideFrom = null;
+  }
+
+  document.querySelectorAll('[data-random-cat]').forEach((btn) => {
+    btn.onclick = () => {
+      switchRandomSectionCategoryWeb(btn.getAttribute('data-random-cat') || 'daily_pick');
+    };
+  });
+
+  const btnMyShuffleToggleDetails = document.getElementById('btn-my-shuffle-toggle-details');
+  if (btnMyShuffleToggleDetails) {
+    btnMyShuffleToggleDetails.onclick = () => {
+      state.myShuffle.detailsExpanded = !state.myShuffle.detailsExpanded;
+      renderApp();
+    };
+  }
+  const btnMyShuffleAgain = document.getElementById('btn-my-shuffle-again');
+  if (btnMyShuffleAgain) {
+    btnMyShuffleAgain.onclick = () => triggerMyShuffleAgainWeb();
   }
 
   const topSourceToggle = document.getElementById('top-source-toggle');
@@ -17179,6 +18148,9 @@ function triggerThrottledSilentSync() {
 }
 
 setInterval(() => {
+  if (!document.hidden && state.tab === 'community' && state.communityViewTab === 'random') {
+    loadDailyRandomAnime(false);
+  }
   if (state.session && (!document.hidden || isTauriAppEnvironment())) {
     NotificationRealtimeManager.ensureConnected();
     refreshUnreadNotificationCount().then(() => updateCommunityRedDotsInPlace());

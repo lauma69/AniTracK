@@ -202,6 +202,11 @@ fun CommunityScreen(
     val dailyRandomAnime by viewModel.dailyRandomAnime.collectAsState()
     val isDailyRandomLoading by viewModel.isDailyRandomLoading.collectAsState()
     val dailyRandomError by viewModel.dailyRandomError.collectAsState()
+    val randomSectionCategory by viewModel.randomSectionCategory.collectAsState()
+    val myShuffleAnime by viewModel.myShuffleAnime.collectAsState()
+    val isMyShuffleLoading by viewModel.isMyShuffleLoading.collectAsState()
+    val myShuffleError by viewModel.myShuffleError.collectAsState()
+    val myShuffleSequence by viewModel.myShuffleSequence.collectAsState()
     val topAnimeSource by viewModel.topAnimeSource.collectAsState()
     val topAnimeLimit by viewModel.topAnimeLimit.collectAsState()
     val topAnimeTimeframe by viewModel.topAnimeTimeframe.collectAsState()
@@ -243,11 +248,16 @@ fun CommunityScreen(
         }
     }
 
-    // Automatically load section data whenever user taps or swipes to Tagged You, Random, or Top
+    // Automatically load & silently quick-sync section data whenever user taps or swipes to Tagged You, Random, or Top
     LaunchedEffect(activeSection) {
         when (activeSection) {
             "tagged" -> viewModel.refreshNotifications(reset = true)
-            "random" -> viewModel.loadDailyRandomAnime(forceRefresh = false)
+            "random" -> {
+                while (true) {
+                    viewModel.loadDailyRandomAnime(forceRefresh = false)
+                    kotlinx.coroutines.delay(15_000L)
+                }
+            }
             "top" -> viewModel.loadTopAnime(forceRefresh = false)
         }
     }
@@ -876,6 +886,13 @@ fun CommunityScreen(
                                 error = dailyRandomError,
                                 onRetry = { viewModel.loadDailyRandomAnime(forceRefresh = true) },
                                 onSelectAnime = onSelectAnime,
+                                selectedCategory = randomSectionCategory,
+                                onSelectCategory = { viewModel.setRandomSectionCategory(it) },
+                                myShuffleItem = myShuffleAnime,
+                                isMyShuffleLoading = isMyShuffleLoading,
+                                myShuffleError = myShuffleError,
+                                myShuffleSequence = myShuffleSequence,
+                                onShuffleAgain = { viewModel.shuffleMyAnime() },
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
